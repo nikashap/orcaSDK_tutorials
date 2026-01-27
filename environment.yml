@@ -1,0 +1,44 @@
+name: orca_test_env
+channels:
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - bzip2=1.0.8=h6c40b1e_6
+  - c-ares=1.19.1=h6c40b1e_0
+  - ca-certificates=2025.7.15=hecd8cb5_0
+  - cmake=3.31.2=hc67f837_0
+  - expat=2.7.1=h6d0c2b6_0
+  - libcurl=8.14.1=h1448931_1
+  - libcxx=19.1.7=haebbb44_3
+  - libev=4.33=h9ed2024_1
+  - libffi=3.4.4=hecd8cb5_1
+  - libnghttp2=1.57.0=h9beae6a_0
+  - libssh2=1.11.1=h3a17b82_0
+  - libuv=1.48.0=h46256e1_0
+  - lz4-c=1.9.4=hcec6c5f_1
+  - ncurses=6.5=h923df54_0
+  - ninja=1.12.1=hecd8cb5_0
+  - ninja-base=1.12.1=h1962661_0
+  - openssl=3.0.17=hee2dfae_0
+  - pip=25.3=pyhc872135_0
+  - python=3.11.13=hbff2529_0
+  - readline=8.3=h49f2429_0
+  - rhash=1.4.3=h04015c4_0
+  - setuptools=78.1.1=py311hecd8cb5_0
+  - sqlite=3.50.2=hc8b0dd6_1
+  - tk=8.6.15=h3a5a201_0
+  - tzdata=2025c=he532380_0
+  - wheel=0.45.1=py311hecd8cb5_0
+  - xz=5.6.4=h46256e1_1
+  - zlib=1.2.13=h4b97444_1
+  - zstd=1.5.6=h138b38a_0
+  - pip:
+      - build==1.4.0
+      - packaging==26.0
+      - pathspec==1.0.3
+      - pybind11==3.0.1
+      - pyorcasdk==1.1.0
+      - pyproject-hooks==1.2.0
+      - scikit-build-core==0.11.6
+prefix: /opt/anaconda3/envs/orca_test_env
