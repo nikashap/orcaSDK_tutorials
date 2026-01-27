@@ -26,6 +26,7 @@ def get_sine_target() -> int:
 while True:
     motor.run()
 
-    motor.set_streamed_position_um(get_sine_target())
+    # motor.set_streamed_position_um(get_sine_target())
+    motor.set_streamed_position_um(80000)
     
     print("Current Position: " + str(motor.get_stream_data().position), end="        \r")

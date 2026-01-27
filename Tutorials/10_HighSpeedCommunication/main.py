@@ -2,7 +2,7 @@ from pyorcasdk import Actuator
 
 motor = Actuator( "MyMotorName" )
 
-serial_port = int(input("Please input the serial port of your connected motor. "))
+serial_port = str(input("Please input the serial port of your connected motor. "))
 
 motor.open_serial_port(serial_port, 1000000, 80)
 
