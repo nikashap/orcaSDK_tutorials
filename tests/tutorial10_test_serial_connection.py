@@ -121,8 +121,10 @@ def measure_stream_throughput(motor: Actuator, duration_seconds: float = 3.0) ->
     end_time = start + duration_seconds
 
     while time.perf_counter() < end_time:
+        # Enables command streaming with the ORCA, which will automatically inject
+        # command stream messages
         motor.run()
-
+        # time since the last successful message with the motor has repeated
         gap_us = motor.time_since_last_response_microseconds()
 
         # Only count valid gaps (not uninitialized values)
@@ -158,33 +160,41 @@ def measure_stream_throughput(motor: Actuator, duration_seconds: float = 3.0) ->
         }
 
 
-def estimate_effective_data_rate(baud_rate: int, latency_us: float) -> dict:
+def estimate_effective_data_rate(baud_rate: int, latency_us: float, function_code: str = "command") -> dict:
     """
     Estimate effective data rates based on baud rate and measured latency.
+    specifically for the Motor Command Stream function in Sleep Mode
+
+    Effective bits per byte (per UG210912 page 5 serial configuration):
+      1 start bit + 8 data bits (in 1 byte of data) + 1 parity bit (even) + 1 stop bit = 11 bits in each effective "byte"
+      The start bit signals the beginning of a byte, the parity bit provides
+      basic error detection, and the stop bit ensures a minimum idle period
+      before the next byte, allowing the receiver to resynchronize.
+
+    Table of estimated total bits for Orca-specific function codes
+    Message Type | Request (bytes) | Response (bytes) | Total bytes | Total bits (x11)
+    Manage High-speed Stream | 12 | 12 | 24 | 264
+    Motor Command Stream | 9 | 19 | 28 | 308
+    Motor Read Stream | 7 | 23 | 30 | 330
+    Motor Write Stream | 10 | 18 | 2 | 308
 
     Args:
         baud_rate: Configured baud rate in bps
-        latency_us: Measured round-trip latency in microseconds
+        latency_us: Measured round-trip latency in microseconds (taken as the mean latency_us in this script)
 
     Returns:
         Dictionary with data rate estimates
     """
-    # Modbus RTU frame sizes for single register read (FC03):
-    #   Request:  8 bytes (addr + func + start_reg + num_regs + CRC)
-    #   Response: 7 bytes (addr + func + byte_count + data + CRC)
-    #   Total:   15 bytes per transaction
-    #
-    # Bits per byte (per UG210912 page 5 serial configuration):
-    #   1 start bit + 8 data bits + 1 parity bit (even) + 1 stop bit = 11 bits
-    #   The start bit signals the beginning of a byte, the parity bit provides
-    #   basic error detection, and the stop bit ensures a minimum idle period
-    #   before the next byte, allowing the receiver to resynchronize.
-    bytes_per_transaction = 15
-    bits_per_byte = 11
-    bits_per_transaction = bytes_per_transaction * bits_per_byte
+
+    bits_per_transaction = {
+        "high_speed": 264,
+        "command": 308,
+        "read": 330,
+        "write": 308
+        }
 
     # Theoretical time at wire speed
-    theoretical_time_us = (bits_per_transaction / baud_rate) * 1_000_000
+    theoretical_time_us = (bits_per_transaction[function_code] / baud_rate) * 1_000_000
 
     # Messages per second based on latency
     if latency_us > 0:
@@ -192,22 +202,17 @@ def estimate_effective_data_rate(baud_rate: int, latency_us: float) -> dict:
     else:
         max_messages_per_second = 0
 
-    # Effective data rate (bytes per second, excluding overhead)
-    # Payload per read: 2 bytes
-    effective_data_rate = max_messages_per_second * 2
-
     return {
         "baud_rate_bps": baud_rate,
         "theoretical_transaction_time_us": theoretical_time_us,
         "measured_latency_us": latency_us,
         "overhead_us": latency_us - theoretical_time_us,
         "max_messages_per_second": max_messages_per_second,
-        "effective_payload_bytes_per_second": effective_data_rate,
         "efficiency_percent": (theoretical_time_us / latency_us * 100) if latency_us > 0 else 0,
     }
 
 
-def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None):
+def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None): 
     """
     Run all connection tests.
 
@@ -308,7 +313,6 @@ def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None):
             print(f"  Measured round-trip:       {estimates['measured_latency_us']:.0f} us")
             print(f"  Overhead (processing/OS):  {estimates['overhead_us']:.0f} us")
             print(f"  Max messages/second:       {estimates['max_messages_per_second']:.0f}")
-            print(f"  Effective payload rate:    {estimates['effective_payload_bytes_per_second']:.0f} bytes/sec")
             print(f"  Wire efficiency:           {estimates['efficiency_percent']:.1f}%")
         else:
             print("  Could not calculate (no valid latency data)")
