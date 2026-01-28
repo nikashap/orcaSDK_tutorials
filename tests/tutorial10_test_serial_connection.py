@@ -169,11 +169,19 @@ def estimate_effective_data_rate(baud_rate: int, latency_us: float) -> dict:
     Returns:
         Dictionary with data rate estimates
     """
-    # Modbus RTU frame overhead (approximate)
-    # Read single register: 8 bytes request + 7 bytes response = 15 bytes
-    # With start/stop bits: 10 bits per byte
+    # Modbus RTU frame sizes for single register read (FC03):
+    #   Request:  8 bytes (addr + func + start_reg + num_regs + CRC)
+    #   Response: 7 bytes (addr + func + byte_count + data + CRC)
+    #   Total:   15 bytes per transaction
+    #
+    # Bits per byte (per UG210912 page 5 serial configuration):
+    #   1 start bit + 8 data bits + 1 parity bit (even) + 1 stop bit = 11 bits
+    #   The start bit signals the beginning of a byte, the parity bit provides
+    #   basic error detection, and the stop bit ensures a minimum idle period
+    #   before the next byte, allowing the receiver to resynchronize.
     bytes_per_transaction = 15
-    bits_per_transaction = bytes_per_transaction * 10
+    bits_per_byte = 11
+    bits_per_transaction = bytes_per_transaction * bits_per_byte
 
     # Theoretical time at wire speed
     theoretical_time_us = (bits_per_transaction / baud_rate) * 1_000_000
