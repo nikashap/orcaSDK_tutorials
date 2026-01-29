@@ -7,13 +7,17 @@ This script tests the serial connection to an ORCA motor and measures:
 - Estimated message throughput (messages per second)
 - Effective data rate
 
+Requirement:
+- Must have version of pyorcasdk and orcasdk from Nikasha's github
+- Must have FTDI driver (but can modify script if you don't have the driver)
+
 Usage:
     python tutorial10_test_serial_connection.py
 
 The script will prompt for connection parameters and run diagnostic tests.
 """
 
-from pyorcasdk import Actuator, MessagePriority
+from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MessagePriority
 import time
 import statistics
 
@@ -221,7 +225,13 @@ def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None):
         baud_rate: Baud rate to connect with (None for default 19200)
         interframe_delay: Interframe delay in us (None for default)
     """
-    motor = Actuator("TestMotor")
+    # Create SerialFTDI with 1ms latency
+    serial = SerialFTDI(latency_ms=1)
+    clock = ChronoClock()
+    
+    # Create Actuator with custom serial interface
+    print("\nCreating motor instance using SerialInterface argument")
+    motor = Actuator(serial, clock, "TestMotor", 1)
 
     print("\n" + "=" * 60)
     print("ORCA Motor Serial Connection Test")
@@ -309,11 +319,11 @@ def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None):
         if latency.get("mean_us", 0) > 0:
             estimates = estimate_effective_data_rate(connect_baud, latency["mean_us"])
             print(f"  Configured baud rate:      {estimates['baud_rate_bps']:,} bps")
-            print(f"  Theoretical tx time:       {estimates['theoretical_transaction_time_us']:.0f} us")
+            print(f"  Theoretical tx time (excluding interframe delay):       {estimates['theoretical_transaction_time_us']:.0f} us")
             print(f"  Measured round-trip:       {estimates['measured_latency_us']:.0f} us")
-            print(f"  Overhead (processing/OS):  {estimates['overhead_us']:.0f} us")
+            print(f"  Overhead (processing,OS->FTDI latency):  {estimates['overhead_us']:.0f} us")
             print(f"  Max messages/second:       {estimates['max_messages_per_second']:.0f}")
-            print(f"  Wire efficiency:           {estimates['efficiency_percent']:.1f}%")
+            print(f"  Efficiency of:           {estimates['efficiency_percent']:.1f}%")
         else:
             print("  Could not calculate (no valid latency data)")
     except Exception as e:
@@ -345,6 +355,9 @@ def run_tests(port: str, baud_rate: int = None, interframe_delay: int = None):
 def main():
     print("\nORCA Motor Serial Connection Tester")
     print("-" * 40)
+    print("\n"+"="*40)
+    print("\nNOTICE: before using this script, ensure motor has target baudrate and delay already set")
+    print("\n"+"="*40+"\n")
 
     # Get connection parameters
     port = input(f"Enter serial port [{DEFAULT_PORT}]: ").strip()
