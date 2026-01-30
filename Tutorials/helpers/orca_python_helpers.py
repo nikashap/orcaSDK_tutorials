@@ -2,6 +2,17 @@ from pyorcasdk import Actuator, MotorMode, MessagePriority
 from time import time, sleep
 from math import sin, pi
 
+def save_user_defaults(motor):
+    """
+    Save user defaults to flash memory (retained through power cycles)
+
+    Writing the "write_value" (toggling the correct "bit_position") of CTRL_REG_2
+    will save the user options sections of registers to flas memory.
+    """
+    CTRL_REG_2 = 2
+    bit_position = 6
+    write_value = 64 #because bit postion 6 is 2^6 = 64
+
 def set_target_baudrate(motor, target_baud, interframe_delay):
     """
     Notes:
