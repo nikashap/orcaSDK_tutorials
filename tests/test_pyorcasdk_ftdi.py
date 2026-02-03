@@ -113,5 +113,5 @@ if __name__ == "__main__":
     target_baud = 1000000
     interframe_delay = 80
 
-    startup_from_default("Startup Motor", port, target_baud, interframe_delay)
+    # startup_from_default("Startup Motor", port, target_baud, interframe_delay)
     test_serial_ftdi(port, target_baud, interframe_delay)

@@ -5,7 +5,7 @@ This version properly waits for the stream to initialize before
 reading position data, preventing the flickering-to-zero issue.
 """
 from pyorcasdk import Actuator, MessagePriority
-import time
+from time import sleep
 
 def set_target_baudrate(motor, target_baud, interframe_delay):
     """
@@ -53,7 +53,7 @@ for _ in range(100):  # Try for up to ~1 second
     if motor.time_since_last_response_microseconds() < 100000:  # < 100ms
         initialized = True
         break
-    time.sleep(0.01)
+    sleep(0.01)
 
 if not initialized:
     print("Warning: Stream may not be fully initialized")
@@ -65,7 +65,7 @@ try:
         motor.run()
         stream_data = motor.get_stream_data()
         print(f"Current Position: {stream_data.position} um", end="        \r")
-        time.sleep(0.002)  # Small delay to prevent CPU spinning
+        sleep(0.002)  # Small delay to prevent CPU spinning
 except KeyboardInterrupt:
     print("\n\nStopping...")
 

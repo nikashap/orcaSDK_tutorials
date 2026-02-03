@@ -1,9 +1,11 @@
-from pyorcasdk import Actuator, MotorMode
+from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MessagePriority, MotorMode
 import pyorcasdk.orca_registers as orca_reg
 
 FORCE_NEWTONS = 30
 SPEED_MM_PER_SEC = 50
 
+baud_rate = 1000000
+interframe_delay = 80
 
 def auto_zero_motor(motor):
     # zero mode - 2: auto zero enabled
@@ -17,15 +19,19 @@ def auto_zero_motor(motor):
 
     motor.set_mode(MotorMode.AutoZeroMode)
 
+# Create SerialFTDI with 1ms latency
+serial = SerialFTDI(latency_ms=1)
+clock = ChronoClock()
 
-motor = Actuator("MyMotorName")
+motor = Actuator(serial, clock, "TestAutoZero", 1)
 
-serial_port = int(input("Please input the serial port of your connected motor. "))
-serial_port_error = motor.open_serial_port(serial_port)
+serial_port = str(input("Please input the serial port of your connected motor. "))
+serial_port_error = motor.open_serial_port(serial_port, baud_rate, interframe_delay)
 
 motor.set_mode(MotorMode.SleepMode)
 
 auto_zero_motor(motor)
+motor.clear_errors()
 
 while True:
     error_check = motor.get_errors()
@@ -33,6 +39,11 @@ while True:
     if error_check.value & orca_reg.ERROR_0_AUTO_ZERO_FAILED_Mask:
         print("Auto Zeroing Failed.")
         break
+    if error_check.value & 2048:
+        print("Communication with the motor timed out")
+        break
     elif motor.get_mode().value != MotorMode.AutoZeroMode:
         print("Auto Zeroing Complete!")
         break
+        
+motor.close_serial_port()

@@ -44,10 +44,12 @@ motor.enable_stream()
 
 # Wait for stream to initialize
 print("Initializing stream...")
-for _ in range(100):
+for i in range(1000):
     motor.run()
     if motor.time_since_last_response_microseconds() < 100000:
+        print("Response time is less than 100 milliseconds; stream is initialized")
         break
+    print(f"{i} iters have passed")
     sleep(0.01)
 
 motor.set_mode(MotorMode.ForceMode)

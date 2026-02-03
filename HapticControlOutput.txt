@@ -1,0 +1,688 @@
+(orca_test_env) jazlabamini@dhcp-10-31-141-173 tests % python3
+Python 3.11.13 (main, Jun  5 2025, 08:14:07) [Clang 14.0.6 ] on darwin
+Type "help", "copyright", "credits" or "license" for more information.
+>>> from pyorcasdk import Actuator, MessagePriority
+>>> 
+>>> from pyorcasdk import SerialFTDI, ChronoClock
+>>> 
+>>> serial = SerialFTDI(latency_ms=1)
+>>> clocl = ChronoClock()
+>>> 
+>>> motor = Actuator(serial, clock, "TestMotor", 1)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'clock' is not defined. Did you mean: 'clocl'?
+>>> motor = Actuator(serial, clocl, "TestMotor", 1)
+>>> 
+>>> port="/dev/cu.usbserial-ABA76SF6"
+>>> target_baud=1000000
+>>> interframe_delay=80
+>>> motor.open_serial_port(port, target_baud, interframe_delay)
+<OrcaError failure=0, message=''>
+>>> 
+>>> result = motor.read_wide_register_blocking(2, MessagePriority.important)
+>>> result.value
+0
+>>> result.value & 32
+0
+>>> 1000000 & 64
+64
+>>> 1000000 & 32
+0
+>>> 1000000 & 2
+0
+>>> 1000000 & 60
+0
+>>> 1000000 & 63
+0
+>>> 1000000 & 64
+64
+>>> 1000000 & 65
+64
+>>> 1000000 & 128
+0
+>>> 1000000 & 67
+64
+>>> 1100000 & 32
+32
+>>> 1100000 & 100000
+32928
+>>> 1100000 & 32
+32
+>>> 1100000 & 64
+64
+>>> 1100000 & 55
+32
+>>> 6 & 3
+2
+>>> 2^6 + 2^5
+15
+>>> 2**6 + 2**5
+96
+>>> 96 & 64
+64
+>>> 96 & 32
+32
+>>> 96 & 2
+0
+>>> 96 & 16
+0
+>>> result = motor.read_register_blocking(2, MessagePriority.important)
+>>> result.value
+0
+>>> save = motor.write_register_blocking(2, 64, MessagePriority.important)
+>>> 
+>>> result = motor.read_register_blocking(2, MessagePriority.important)
+>>> result
+<pyorcasdk._pyorcasdk.OrcaResultUInt16 object at 0x10a6b4070>
+>>> result.value
+0
+>>> save.result
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaError' object has no attribute 'result'
+>>> save.error
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaError' object has no attribute 'error'
+>>> save
+<OrcaError failure=0, message=''>
+>>> save.what()
+''
+>>> 
+>>> motor.read_register_blocking(2)
+<pyorcasdk._pyorcasdk.OrcaResultUInt16 object at 0x10a639270>
+>>> 
+>>> result = motor.read_register_blocking(2)
+>>> 
+>>> result.what()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaResultUInt16' object has no attribute 'what'
+>>> result.value
+0
+>>> save = motor.write_register_blocking(2, 64, MessagePriority.important)
+>>> save.what()
+''
+>>> result = motor.read_register_blocking(2)
+>>> result.value
+0
+>>> motor.close_serial_port()
+>>> 
+>>> motor.open_serial_port(port, target_baud, interframe_delay)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.read_multiple_registers_blocking(164, 2)
+<pyorcasdk._pyorcasdk.OrcaResultList object at 0x10a6a5db0>
+>>> read_baud = motor.read_multiple_registers_blocking(164, 2)
+>>> read_baud.value
+[16960, 15]
+>>> motor.close_serial_port()
+>>> ls
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'ls' is not defined
+>>> from pyorcasdk import Actuator, MotorMode
+>>> motor
+<pyorcasdk._pyorcasdk.Actuator object at 0x10a6a70b0>
+>>> motor.open_serial_port(port, b
+bin(         bool(        break        breakpoint(  bytearray(   bytes(
+>>> motor.open_serial_port(port, target_baud, interframe_delay)
+<OrcaError failure=0, message=''>
+>>> 
+>>> FORCE_NEWTONS = 10
+>>> SPEED_MM_PER_SEC = 50
+>>> 
+>>> motor.set_mode(MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> import pyorcasdk.orca_registers as orca_reg
+>>> 
+>>> motor.write_register_blocking(orca_reg.ZERO_MODE, orca_reg.ZERO_MODE_AUTO_ZERO_ENABLED)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_FORCE_N, FORCE_NEWTONS)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_SPEED_MMPS, SPEED_MM_PER_SEC)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_EXIT_MODE, MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> while True:
+...     error_check = motor.get_errors()
+...     if error_check.value & orca_reg.ERROR_0_AUTO_ZERO_FAILED_Mask:
+...         print("Auto Zeroing Failed")
+...         break
+...     elif motor.get_mode().value != MotorMode.AutoZeroMode:
+...         print("Auto Zeroing Complete!")
+...         break
+... 
+Auto Zeroing Complete!
+>>> while True:
+...     print("Current Position: " + str(motor.get_position_um().value), end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> dir(motor)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '_pybind11_conduit_v1_', 'begin_serial_logging', 'clear_errors', 'close_serial_port', 'disable_stream', 'enable_haptic_effects', 'enable_stream', 'get_errors', 'get_force_mN', 'get_latched_errors', 'get_major_version', 'get_mode', 'get_position_um', 'get_power_W', 'get_release_state', 'get_revision_number', 'get_serial_number', 'get_stream_data', 'get_temperature_C', 'get_voltage_mV', 'name', 'open_serial_port', 'read_multiple_registers_blocking', 'read_register_blocking', 'read_wide_register_blocking', 'read_write_multiple_registers_blocking', 'run', 'set_constant_force', 'set_constant_force_filter', 'set_damper', 'set_inertia', 'set_kinematic_motion', 'set_max_force', 'set_max_power', 'set_max_temp', 'set_mode', 'set_osc_effect', 'set_pctrl_tune_softstart', 'set_safety_damping', 'set_spring_effect', 'set_streamed_force_mN', 'set_streamed_position_um', 'time_since_last_response_microseconds', 'trigger_kinematic_motion', 'tune_position_controller', 'update_haptic_stream_effects', 'write_multiple_registers_blocking', 'write_register_blocking', 'write_wide_register_blocking', 'zero_position']
+>>> motor.get_mode()
+<pyorcasdk._pyorcasdk.OrcaResultMotorMode object at 0x10a6a7cb0>
+>>> 
+>>> current_mode = motor.get_mode()
+>>> current_mode
+<pyorcasdk._pyorcasdk.OrcaResultMotorMode object at 0x10a6817b0>
+>>> current_mode.value()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+TypeError: 'pyorcasdk._pyorcasdk.MotorMode' object is not callable
+>>> current_mode.value
+<MotorMode.SleepMode: 1>
+>>> 
+>>> 
+>>> motor.write_register_blocking(orca_reg.ZERO_MODE, orca_reg.ZERO_MODE_AUTO_ZERO_ENABLED)
+<OrcaError failure=0, message=''>
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_FORCE_N, FORCE_NEWTONS)
+<OrcaError failure=0, message=''>
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_SPEED_MMPS, SPEED_MM_PER_SEC)
+<OrcaError failure=0, message=''>
+>>> motor.write_register_blocking(orca_reg.AUTO_ZERO_EXIT_MODE, MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.set_mode(MotorMode.AutoZeroMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> while True:
+...     error_check = motor.get_errors()
+...     if error_check.value & orca_reg.ERROR_0_AUTO_ZERO_FAILED_Mask:
+...         print("Auto Zeroing Failed")
+...         break
+...     elif motor.get_mode().value != MotorMode.AutoZeroMode:
+...         print("Auto Zeroing Complete!")
+...         break
+... 
+Auto Zeroing Complete!
+>>> 
+>>> current_mode = motor.get_mode()
+>>> current_mode.value
+<MotorMode.SleepMode: 1>
+>>> 
+>>> while True:
+...     print("Current Position: " + str(motor.get_position_um().value), end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> motor.enable_stream()
+>>> 
+>>> # Wait for stream to initialize
+>>> print("Initializing stream...")
+Initializing stream...
+>>> for _ in range(100):
+...     motor.run()
+...     if motor.time_since_last_response_microseconds() < 100000:
+...         break
+...     sleep(0.01)
+... 
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+NameError: name 'sleep' is not defined
+>>> 
+>>> 
+>>> 
+>>> from time import sleep
+>>> 
+>>> # Wait for stream to initialize
+>>> print("Initializing stream...")
+Initializing stream...
+>>> for _ in range(100):
+...     motor.run()
+...     if motor.time_since_last_response_microseconds() < 100000:
+...         break
+...     sleep(0.01)
+... 
+>>> 
+>>> motor.set_mode(MotorMode.HapticMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> from pyorcasdk import HapticEffect, OscillatorType
+>>> 
+>>> from math import sin, pi
+>>> motor.update_haptic_stream_effects(HapticEffect.Osc0 | HapticEffect.Spring0)
+>>> motor.set_spring_effect( #Update spring parameters
+...     0,      #Spring ID (0, 1, or 2)
+...     200,    #Spring strength
+...     40000   #Center position
+... )
+<OrcaError failure=0, message=''>
+>>> motor.set_osc_effect(
+...     0,      #Oscillator ID (0 or 1)
+...     20,     #Oscillator max force (newtons)
+...     10,     #Frequency (decihertz)
+...     0,      #Duty cycle (not used in sine wave)
+...     OscillatorType.Sine
+... )
+<OrcaError failure=0, message=''>
+>>> while True:
+...     motor.run()
+... 
+    print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> 
+>>> dir(motor)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '_pybind11_conduit_v1_', 'begin_serial_logging', 'clear_errors', 'close_serial_port', 'disable_stream', 'enable_haptic_effects', 'enable_stream', 'get_errors', 'get_force_mN', 'get_latched_errors', 'get_major_version', 'get_mode', 'get_position_um', 'get_power_W', 'get_release_state', 'get_revision_number', 'get_serial_number', 'get_stream_data', 'get_temperature_C', 'get_voltage_mV', 'name', 'open_serial_port', 'read_multiple_registers_blocking', 'read_register_blocking', 'read_wide_register_blocking', 'read_write_multiple_registers_blocking', 'run', 'set_constant_force', 'set_constant_force_filter', 'set_damper', 'set_inertia', 'set_kinematic_motion', 'set_max_force', 'set_max_power', 'set_max_temp', 'set_mode', 'set_osc_effect', 'set_pctrl_tune_softstart', 'set_safety_damping', 'set_spring_effect', 'set_streamed_force_mN', 'set_streamed_position_um', 'time_since_last_response_microseconds', 'trigger_kinematic_motion', 'tune_position_controller', 'update_haptic_stream_effects', 'write_multiple_registers_blocking', 'write_register_blocking', 'write_wide_register_blocking', 'zero_position']
+>>> errors = motor.get_errors()
+>>> 
+>>> errors.value
+2048
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> motor.get_errors()
+<pyorcasdk._pyorcasdk.OrcaResultUInt16 object at 0x10a2dc130>
+>>> errors = motor.get_errors()
+>>> 
+>>> errors.value
+2048
+>>> motor.disable_stream()
+>>> 
+>>> 
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> motor.set_mode(MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> errors = motor.get_errors()
+>>> errors.value
+0
+>>> motor.enable_stream()
+>>> 
+>>> # Wait for stream to initialize
+>>> print("Initializing stream...")
+Initializing stream...
+>>> for _ in range(1000):
+...     motor.run()
+...     if motor.time_since_last_response_microseconds() < 100000:
+...         print("Response time is less than 100 milliseconds; stream is initialized")
+...         break
+...     print("1000 iters have passed")
+...     sleep(0.01)
+... 
+1000 iters have passed
+Response time is less than 100 milliseconds; stream is initialized
+>>> 
+>>> # Wait for stream to initialize
+>>> print("Initializing stream...")
+Initializing stream...
+>>> for i in range(1000):
+...     motor.run()
+...     if motor.time_since_last_response_microseconds() < 100000:
+...         print("Response time is less than 100 milliseconds; stream is initialized")
+...         break
+...     print(f"{i} iters have passed")
+...     sleep(0.01)
+... 
+0 iters have passed
+Response time is less than 100 milliseconds; stream is initialized
+>>> motor.set_mode(MotorMode.HapticMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> errors = motor.get_errors()
+>>> errors.value
+2048
+>>> 
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> errors = motor.get_errors()
+>>> errors.value
+2048
+>>> try:
+...     while True:
+...         motor.run()
+...         stream_data = motor.get_stream_data()
+...         print(f"Current Position: {stream_data.position} um", end="        \r")
+...         time.sleep(0.002)  # Small delay to prevent CPU spinning
+... except KeyboardInterrupt:
+...     print("\n\nStopping...")
+... 
+Traceback (most recent call last): 
+  File "<stdin>", line 6, in <module>
+NameError: name 'time' is not defined
+>>> 
+>>> from time import time
+>>> 
+>>> try:
+...     while True:
+...         motor.run()
+...         stream_data = motor.get_stream_data()
+...         print(f"Current Position: {stream_data.position} um", end="        \r")
+...         time.sleep(0.002)  # Small delay to prevent CPU spinning
+... except KeyboardInterrupt:
+...     print("\n\nStopping...")
+... 
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+AttributeError: 'builtin_function_or_method' object has no attribute 'sleep'
+>>> try:
+...     while True:
+...         motor.run()
+...         stream_data = motor.get_stream_data()
+...         print(f"Current Position: {stream_data.position} um", end="        \r")
+...         sleep(0.002)  # Small delay to prevent CPU spinning
+... except KeyboardInterrupt:
+...     print("\n\nStopping...")
+... 
+^Crrent Position: 82235 um         
+
+Stopping...
+>>> while True:
+...     print("Current Position: " + str(motor.get_position_um().value), end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> orca_reg.USER_COMMS_TIMEOUT
+163
+>>> timeout = motor.read_register_blocking(orca_reg.USER_COMMS_TIMEOUT)
+>>> timeout.value
+0
+>>> timeout = motor.read_register_blocking(orca_reg.LOG_PERIOD)
+>>> timeout.value
+65535
+>>> timeout.error
+<OrcaError failure=0, message=''>
+>>> timeout = motor.read_register_blocking(orca_reg.USER_COMMS_TIMEOUT)
+>>> timeout.error
+<OrcaError failure=0, message=''>
+>>> 
+>>> timeout = motor.write_register_blocking(orca_reg.USER_COMMS_TIMEOUT, 1)
+>>> timeout.error
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaError' object has no attribute 'error'
+>>> timeout.what()
+''
+>>> 
+>>> timeout = motor.read_register_blocking(orca_reg.USER_COMMS_TIMEOUT)
+>>> 
+>>> timeout.value
+1
+>>> 
+>>> motor.get_mode()
+<pyorcasdk._pyorcasdk.OrcaResultMotorMode object at 0x10a2dc130>
+>>> motor.get_mode().value
+<MotorMode.HapticMode: 4>
+>>> 
+>>> motor.set_mode(MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> motor.disable_stream()
+>>> 
+>>> motor.get_errors().what()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaResultUInt16' object has no attribute 'what'
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.enable_stream()
+>>> 
+>>> motor.set_mode(MotorMode.HapticMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.update_haptic_stream_effects(HapticEffect.Osc0 | HapticEffect.Spring0)
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.set_spring_effect(0, 200, 40000)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.set_osc_effect(0, 20, 10, 0, OscillatorType.Sine)
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> while True:
+...     motor.run()
+... 
+    print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+
+)
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> while True:
+...     motor.run()
+...     print("Sensed Force: " + str(motor.get_steram_data().force), end="        \r")
+... 
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.Actuator' object has no attribute 'get_steram_data'. Did you mean: 'get_stream_data'?
+>>> while True:
+...     motor.run()
+...     print("Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> motor.get_errors().error
+<OrcaError failure=0, message=''>
+>>> 
+>>> motor.get_errors().error.value
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.OrcaError' object has no attribute 'value'
+>>> motor.get_errors().value
+2048
+>>> 
+>>> 
+>>> errors = motor.get_errors().value
+>>> 
+>>> errors
+2048
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> 
+>>> errors = motor.get_errors().value
+>>> errors
+2048
+>>> motor.disable_stream()
+>>> 
+>>> 
+>>> timeout = motor.read_register_blocking(orca_reg.USER_COMMS_TIMEOUT)
+>>> timeout.value
+1
+>>> motor.set_mode(MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> 
+>>> timeout = motor.write_register_blocking(orca_reg.USER_COMMS_TIMEOUT, 500)
+>>> 
+>>> timeout = motor.read_register_blocking(orca_reg.USER_COMMS_TIMEOUT)
+>>> 
+>>> timeout.value
+500
+>>> errors = motor.get_errors().value
+>>> errors
+0
+>>> motor.get_mode()
+<pyorcasdk._pyorcasdk.OrcaResultMotorMode object at 0x10a1d0070>
+>>> motor.get_mode().value
+<MotorMode.SleepMode: 1>
+>>> 
+>>> motor.enable_stream()
+>>> 
+>>> # Wait for stream to initialize
+>>> print("Initializing stream...")
+Initializing stream...
+>>> for i in range(1000):
+...     motor.run()
+...     if motor.time_since_last_response_microseconds() < 100000:
+...         print("Response time is less than 100 milliseconds; stream is initialized")
+...         break
+...     print(f"{i} iters have passed")
+...     sleep(0.01)
+... 
+0 iters have passed
+Response time is less than 100 milliseconds; stream is initialized
+>>> 
+>>> while True:
+...     motor.run()
+... 
+                                                                                   ^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> 
+>>> 
+>>> 
+>>> while True:
+...     motor.run()
+...     print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> while True:
+...     motor.run()
+...     stream_data = motor.get_stream_data()
+...     print(f"Current Position: {stream_data.position} um", end="        \r")
+... 
+^CTraceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+KeyboardInterrupt
+>>> 
+>>> 
+>>> print(moto.get_errors().value)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'moto' is not defined. Did you mean: 'motor'?
+>>> print(motor.get_errors().value)
+0
+>>> 
+>>> print(motor.get_errors().value)
+0
+>>> 
+>>> 
+>>> print(motor.get_errors().value)
+0
+>>> 
+>>> dir(stream_data)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '_pybind11_conduit_v1_', 'errors', 'force', 'position', 'power', 'temperature', 'voltage']
+>>> print(moto.get_errors().value)
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'moto' is not defined. Did you mean: 'motor'?
+>>> print(motor.get_errors().value)
+0
+>>> 
+>>> dir(stream_data)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '_pybind11_conduit_v1_', 'errors', 'force', 'position', 'power', 'temperature', 'voltage']
+>>> stream_data.errors
+0
+>>> stream_data.force
+-40
+>>> stream_data.position
+95638
+>>> stream_data.position
+95638
+>>> stream_data.voltage
+23699
+>>> 
+>>> 
+>>> dir(motor)
+['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '_pybind11_conduit_v1_', 'begin_serial_logging', 'clear_errors', 'close_serial_port', 'disable_stream', 'enable_haptic_effects', 'enable_stream', 'get_errors', 'get_force_mN', 'get_latched_errors', 'get_major_version', 'get_mode', 'get_position_um', 'get_power_W', 'get_release_state', 'get_revision_number', 'get_serial_number', 'get_stream_data', 'get_temperature_C', 'get_voltage_mV', 'name', 'open_serial_port', 'read_multiple_registers_blocking', 'read_register_blocking', 'read_wide_register_blocking', 'read_write_multiple_registers_blocking', 'run', 'set_constant_force', 'set_constant_force_filter', 'set_damper', 'set_inertia', 'set_kinematic_motion', 'set_max_force', 'set_max_power', 'set_max_temp', 'set_mode', 'set_osc_effect', 'set_pctrl_tune_softstart', 'set_safety_damping', 'set_spring_effect', 'set_streamed_force_mN', 'set_streamed_position_um', 'time_since_last_response_microseconds', 'trigger_kinematic_motion', 'tune_position_controller', 'update_haptic_stream_effects', 'write_multiple_registers_blocking', 'write_register_blocking', 'write_wide_register_blocking', 'zero_position']
+>>> 
+>>> stream_data.time_since_last_response_microseconds
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+AttributeError: 'pyorcasdk._pyorcasdk.StreamData' object has no attribute 'time_since_last_response_microseconds'
+>>> 
+>>> 
+>>> motor.time_since_last_response_microseconds
+<bound method pybind11_detail_function_record_v1_system_libcpp_abi1.time_since_last_response_microseconds of <pyorcasdk._pyorcasdk.Actuator object at 0x10a6a70b0>>
+>>> motor.time_since_last_response_microseconds()
+448461807
+>>> 
+>>> 
+>>> motor.time_since_last_response_microseconds()
+462165783
+>>> motor.time_since_last_response_microseconds()
+463637798
+>>> motor.time_since_last_response_microseconds()
+471221911
+>>> motor.time_since_last_response_microseconds()
+472613815
+>>> motor.time_since_last_response_microseconds()
+472893816
+>>> motor.time_since_last_response_microseconds()
+473629788
+>>> 
+>>> while True:
+...     motor.run()
+...     stream_data = motor.get_stream_data()
+...     print(f"Current Force: {stream_data.force} mN", end="        \r")
+... 
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+KeyboardInterrupt
+>>> 
+>>> 
+>>> print(motor.get_errors().value)
+0
+>>> 
+>>> motor.get_mode()
+<pyorcasdk._pyorcasdk.OrcaResultMotorMode object at 0x10a6557f0>
+>>> motor.get_mode().value
+<MotorMode.SleepMode: 1>
+>>> 
+>>> 
+>>> 
+>>> motor.set_mode(MotorMode.HapticMode)
+<OrcaError failure=0, message=''>
+>>> 
+>>> print(motor.get_errors().value)
+2048
+>>> 
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> print(motor.get_errors().value)
+2048
+>>> 
+>>> 
+>>> 
+>>> 
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> motor.clear_errors()
+<OrcaError failure=0, message=''>
+>>> print(motor.get_errors().value)
+2048
+>>> 
+>>> motor.disable_stream()
+>>> motor.set_mode(MotorMode.SleepMode)
+<OrcaError failure=0, message=''>
+>>> 
+
