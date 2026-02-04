@@ -1,5 +1,5 @@
 # orcaSDK_tutorials
-
+NOTE: Read ftdi_orca_setup_guide.md for instructions on how to setup ORCA with MacOS
 ## Introduction
 
 This repo contains a set of small code examples and tutorials for illustrating how to interact with your Orca series motor through our [C++](https://github.com/IrisDynamics/orcaSDK/) or [Python](https://pypi.org/project/pyorcasdk/0.2.0/) SDK. This repo contains tutorials for common use cases for using our motors via the SDK. 
