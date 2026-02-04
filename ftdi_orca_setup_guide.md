@@ -1,5 +1,5 @@
 # FTDI D2XX Driver Setup for High-Speed ORCA Motor Communication on macOS
-
+(Summary provided by Claude)
 ## Overview
 
 This guide documents the process of enabling high-speed serial communication (up to 1M+ baud) between a Mac and an Iris Dynamics ORCA motor using FTDI USB-to-serial adapters. It covers the underlying issues with macOS serial drivers, the solution using FTDI's D2XX direct drivers, and modifications to the `pyorcasdk` library to support non-standard baud rates.
@@ -54,8 +54,8 @@ Baud rates like 460,800, 921,600, and 1,000,000 are rejected by the OS serial dr
 ### Physical Setup
 
 ```
-┌─────────────┐      ┌─────────────────────────────────────┐      ┌─────────────┐
-│             │      │       USB-RS422-WE Adapter          │      │             │
+┌─────────────┐      ┌────────────────────────────────────┐      ┌─────────────┐
+│             │      │       USB-RS422-WE Adapter         │      │             │
 │   Mac Mini  │      │  ┌─────────────────────────────┐   │      │ ORCA Motor  │
 │             │ USB  │  │      FTDI FT232R Chip       │   │ RS422│             │
 │             │◄────►│  │                             │   │◄────►│             │
@@ -63,7 +63,7 @@ Baud rates like 460,800, 921,600, and 1,000,000 are rejected by the OS serial dr
 │             │      │  │  • Has 16ms default latency │   │      │             │
 │             │      │  │  • Supports up to 3M baud   │   │      │             │
 │             │      │  └─────────────────────────────┘   │      │             │
-└─────────────┘      └─────────────────────────────────────┘      └─────────────┘
+└─────────────┘      └────────────────────────────────────┘      └─────────────┘
 ```
 
 ### The FTDI Chip
@@ -85,6 +85,7 @@ The chip itself supports baud rates up to 3,000,000—the limitation is in how s
 ### ASIO vs D2XX
 
 **Boost.Asio (used by SerialASIO)**
+- What Mac uses natively
 - A cross-platform C++ library for network and low-level I/O
 - Communicates through the **operating system's serial port driver**
 - Limited to baud rates supported by the OS
@@ -131,9 +132,11 @@ For ORCA motors using Modbus RTU with even parity:
 
 The solution involves two parts:
 
-1. **Quick Win**: Install D2XX drivers and reduce the FTDI latency timer from 16ms to 1ms. This dramatically improves performance without code changes to pyorcasdk.
+1. Install D2XX drivers and reduce the FTDI latency timer from 16ms to 1ms. This dramatically improves performance without code changes to pyorcasdk.
 
-2. **Full Solution**: Modify pyorcasdk to use D2XX directly, enabling non-standard baud rates (460,800, 1,000,000, etc.) on macOS.
+2. Modify pyorcasdk to use D2XX directly, enabling non-standard baud rates (460,800, 1,000,000, etc.) on macOS.
+
+**Nikasha's forked repositories of `orcaSDK` and `pyorcasdk` already have the FTDI modifications implemented.**
 
 ---
 
@@ -350,7 +353,6 @@ python your_motor_script.py
 |--------|----------------------|---------------------|
 | Round-trip latency | ~16,000 µs | ~2,000 µs |
 | Max messages/sec | ~63 Hz | ~500 Hz |
-| Wire efficiency | ~8% | ~65% |
 
 ---
 
