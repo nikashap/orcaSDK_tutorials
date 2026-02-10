@@ -7,6 +7,53 @@ from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MessagePriority, MotorM
 import pyorcasdk.orca_registers as orca_reg
 import time
 import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_latency_histogram(latencies, baud_rate, interframe_delay):
+    """
+    Plot a histogram of latency measurements.
+
+    Args:
+        latencies: List of latency values in microseconds
+        baud_rate: Baud rate used for the test
+        interframe_delay: Interframe delay in microseconds
+    """
+    latencies_ms = np.array(latencies) / 1000  # Convert to milliseconds
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Determine bin edges - use 50 bins or auto if data range is small
+    n_bins = 50
+
+    counts, bins, patches = ax.hist(latencies_ms, bins=n_bins, edgecolor='black', alpha=0.7)
+
+    # Add statistics as text
+    stats_text = (
+        f"N = {len(latencies):,}\n"
+        f"Mean = {np.mean(latencies_ms):.2f} ms\n"
+        f"Median = {np.median(latencies_ms):.2f} ms\n"
+        f"Std = {np.std(latencies_ms):.2f} ms\n"
+        f"Min = {np.min(latencies_ms):.2f} ms\n"
+        f"Max = {np.max(latencies_ms):.2f} ms\n"
+        f"Rate = {1000 / np.mean(latencies_ms):.0f} Hz"
+    )
+    ax.text(0.97, 0.97, stats_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Add vertical line at mean
+    ax.axvline(np.mean(latencies_ms), color='red', linestyle='--', linewidth=2, label='Mean')
+    ax.axvline(np.median(latencies_ms), color='green', linestyle=':', linewidth=2, label='Median')
+
+    ax.set_xlabel('Latency (ms)', fontsize=12)
+    ax.set_ylabel('Count', fontsize=12)
+    ax.set_title(f'Stream Latency Distribution\n(Baud: {baud_rate:,}, Interframe Delay: {interframe_delay} µs)', fontsize=14)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
 
 def startup_from_default(motor_name,
                          port="/dev/cu.usbserial-ABA76SF6",
@@ -172,16 +219,19 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         min_lat = float(np.min(latencies))
         max_lat = float(np.max(latencies))
         std_dev = float(np.std(latencies))
-        
+
         print(f"\n  Min:  {min_lat:,.0f} µs")
         print(f"  Avg:  {avg:,.0f} µs")
         print(f"  Max:  {max_lat:,.0f} µs")
         print(f"  Std dev:  {std_dev:,.0f} µs")
         print(f"  Rate: {1_000_000 / avg:.0f} Hz")
-        
+
         motor.set_mode(MotorMode.SleepMode)
         motor.close_serial_port()
         print("\nTest complete!")
+
+        # Plot latency distribution histogram
+        plot_latency_histogram(latencies, baud_rate, interframe_delay)
         
     except Exception as e:
         print(f"Error: {e}")
