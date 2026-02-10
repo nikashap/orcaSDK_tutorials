@@ -85,66 +85,80 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         # Latency test
         num_samples = 100000
         print(f"\nMeasuring latency ({num_samples} samples)...")
-        latencies = np.zeros((num_samples,))
+        latencies = []
         
         if test_stream:
-            print("Testing speed of Motor stream with one additional read/write")
-            print("in HAPTIC mode")
+            print("Testing speed of Motor stream with one additional read/write,")
+            print("in FORCE mode\n")
 
-            motor.set_mode(MotorMode.HapticMode)
+            motor.set_mode(MotorMode.ForceMode)
             motor.clear_errors()
 
             #Enable stream and update haptic effects
             motor.enable_stream()
-            motor.update_haptic_stream_effects(HapticEffect.ConstF)
-
             force_effect = 10000 #millinewtons
-            force_effect_low = force_effect & 0xFFFF
-            force_effect_high = force_effect >> 16
-
-            motor.set_constant_force(force_effect)
             
-            ## More accurate latency monitoring
-            prev_pos = motor.get_stream_data().position
-            update_times = []
-            t_start = time.perf_counter()
+            ## The block below is for Haptic mode
+            # motor.update_haptic_stream_effects(HapticEffect.ConstF)
+            # force_effect_low = force_effect & 0xFFFF
+            # force_effect_high = force_effect >> 16
+
+            # motor.set_constant_force(force_effect)
             ##
 
+            ## Wait for stream to initialize and receive first valid response
+            print("Initializing stream...")
+            initialized = False
+            for _ in range(1000):  # Try for up to 1 second
+                motor.run()
+                # Check if we've received a response (gap will be small after first response)
+                if motor.time_since_last_response_microseconds() < 100000:  # < 100ms
+                    initialized = True
+                    print("Stream initialization confirmed.")
+                    break
+
+            if not initialized:
+                print("Warning: Stream may not be fully initialized")
+
+            ## More accurate latency monitoring
+            prev_pos = motor.get_stream_data().position
+            t_start = time.perf_counter()
+            ##
+            print("Begin timer test...")
             start = time.perf_counter()
             for i in range(num_samples):
 
                 motor.run()
+
+                #Force control
+                motor.set_streamed_force_mN(force_effect)
+                print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
                 
                 current_pos = motor.get_stream_data().position
-                if current_pos != prev_pos:  # response actually arrived
+                if current_pos != prev_pos:  # we know a response actually arrived
                     t_now = time.perf_counter()
-                    update_times.append(t_now - t_start)
+                    latencies.append((t_now - t_start) * 1_000_000)
                     t_start = t_now
                     prev_pos = current_pos
                 
-                # Even though force isn't changing, test to see if read/write combined register works
-                read_data = motor.read_write_multiple_registers_blocking(
-                    read_starting_address = orca_reg.SHAFT_ACCEL_MMPSS,
-                    read_num_registers = 2,
-                    write_starting_address = orca_reg.CONSTANT_FORCE_MN,
-                    write_data = [force_effect_low, force_effect_high]
-                )
-
-                print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
-                end = time.perf_counter()
-                latencies[i] = (end - start) * 1_000_000
-
-                measured_accel = read_data.value[1] << 16 | read_data.value[0]
-                print()
-                print("\nAcceleration: " + str(measured_accel), end="        \r")
+                ## For testing latencies with single read/writes to registers (not streamed)
+                # read_data = motor.read_write_multiple_registers_blocking(
+                #     read_starting_address = orca_reg.SHAFT_ACCEL_MMPSS,
+                #     read_num_registers = 2,
+                #     write_starting_address = orca_reg.CONSTANT_FORCE_MN,
+                #     write_data = [force_effect_low, force_effect_high]
+                # )
+                # measured_accel = read_data.value[1] << 16 | read_data.value[0]
+                # print()
+                # print("\nAcceleration: " + str(measured_accel), end="        \r")
+                ## 
             
             motor.disable_stream()
             print("="*60)
             print("This may be more accurate")
-            update_latencies = np.array(update_times) * 1_000_000
-            print(f"Actual stream update rate: {1_000_000 / np.mean(update_latencies):.0f} Hz")
-            print(f"Avg round-trip: {np.mean(update_latencies):.0f} µs")
-            print(f"Stdev round-trip: {np.std(update_latencies):.0f} µs")
+            print(f"Actual stream update rate: {1_000_000 / np.mean(latencies):.0f} Hz")
+            print(f"Avg round-trip: {np.mean(latencies):.0f} µs")
+            print(f"Stdev round-trip: {np.std(latencies):.0f} µs")
             print("="*60)
 
         else:
@@ -152,7 +166,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
                 start = time.perf_counter()
                 motor.read_register_blocking(342, MessagePriority.important)  # Shaft position
                 end = time.perf_counter()
-                latencies[i] = (end - start) * 1_000_000
+                latencies.append((end - start) * 1_000_000)
         
         avg = float(np.mean(latencies))
         min_lat = float(np.min(latencies))
