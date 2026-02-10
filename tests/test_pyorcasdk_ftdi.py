@@ -3,8 +3,10 @@
 Test SerialFTDI with pyorcasdk at high baud rates.
 """
 
-from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MessagePriority
+from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MessagePriority, MotorMode, HapticEffect
+import pyorcasdk.orca_registers as orca_reg
 import time
+import numpy as np
 
 def startup_from_default(motor_name,
                          port="/dev/cu.usbserial-ABA76SF6",
@@ -47,7 +49,7 @@ def startup_from_default(motor_name,
     motor.close_serial_port()
     return motor, err_delay, err_baudrate
 
-def test_serial_ftdi(port, baud_rate, interframe_delay):
+def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
     print("=" * 60)
     print("Testing SerialFTDI with pyorcasdk")
     print("=" * 60)
@@ -81,24 +83,89 @@ def test_serial_ftdi(port, baud_rate, interframe_delay):
         print(f"  Active baud (reg 482-483): {result.value}")
         
         # Latency test
-        print("\nMeasuring latency (100 samples)...")
-        latencies = []
+        num_samples = 100000
+        print(f"\nMeasuring latency ({num_samples} samples)...")
+        latencies = np.zeros((num_samples,))
         
-        for _ in range(100):
+        if test_stream:
+            print("Testing speed of Motor stream with one additional read/write")
+            print("in HAPTIC mode")
+
+            motor.set_mode(MotorMode.HapticMode)
+            motor.clear_errors()
+
+            #Enable stream and update haptic effects
+            motor.enable_stream()
+            motor.update_haptic_stream_effects(HapticEffect.ConstF)
+
+            force_effect = 10000 #millinewtons
+            force_effect_low = force_effect & 0xFFFF
+            force_effect_high = force_effect >> 16
+
+            motor.set_constant_force(force_effect)
+            
+            ## More accurate latency monitoring
+            prev_pos = motor.get_stream_data().position
+            update_times = []
+            t_start = time.perf_counter()
+            ##
+
             start = time.perf_counter()
-            motor.read_register_blocking(342, MessagePriority.important)  # Shaft position
-            end = time.perf_counter()
-            latencies.append((end - start) * 1_000_000)
+            for i in range(num_samples):
+
+                motor.run()
+                
+                current_pos = motor.get_stream_data().position
+                if current_pos != prev_pos:  # response actually arrived
+                    t_now = time.perf_counter()
+                    update_times.append(t_now - t_start)
+                    t_start = t_now
+                    prev_pos = current_pos
+                
+                # Even though force isn't changing, test to see if read/write combined register works
+                read_data = motor.read_write_multiple_registers_blocking(
+                    read_starting_address = orca_reg.SHAFT_ACCEL_MMPSS,
+                    read_num_registers = 2,
+                    write_starting_address = orca_reg.CONSTANT_FORCE_MN,
+                    write_data = [force_effect_low, force_effect_high]
+                )
+
+                print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+                end = time.perf_counter()
+                latencies[i] = (end - start) * 1_000_000
+
+                measured_accel = read_data.value[1] << 16 | read_data.value[0]
+                print()
+                print("\nAcceleration: " + str(measured_accel), end="        \r")
+            
+            motor.disable_stream()
+            print("="*60)
+            print("This may be more accurate")
+            update_latencies = np.array(update_times) * 1_000_000
+            print(f"Actual stream update rate: {1_000_000 / np.mean(update_latencies):.0f} Hz")
+            print(f"Avg round-trip: {np.mean(update_latencies):.0f} µs")
+            print(f"Stdev round-trip: {np.std(update_latencies):.0f} µs")
+            print("="*60)
+
+        else:
+            for i in range(num_samples):
+                start = time.perf_counter()
+                motor.read_register_blocking(342, MessagePriority.important)  # Shaft position
+                end = time.perf_counter()
+                latencies[i] = (end - start) * 1_000_000
         
-        avg = sum(latencies) / len(latencies)
-        min_lat = min(latencies)
-        max_lat = max(latencies)
+        avg = float(np.mean(latencies))
+        min_lat = float(np.min(latencies))
+        max_lat = float(np.max(latencies))
+        std_dev = float(np.std(latencies))
         
-        print(f"  Min:  {min_lat:,.0f} µs")
+        print(f"\n  Min:  {min_lat:,.0f} µs")
         print(f"  Avg:  {avg:,.0f} µs")
         print(f"  Max:  {max_lat:,.0f} µs")
+        print(f"  Std dev:  {std_dev:,.0f} µs")
         print(f"  Rate: {1_000_000 / avg:.0f} Hz")
         
+        motor.set_mode(MotorMode.SleepMode)
         motor.close_serial_port()
         print("\nTest complete!")
         
