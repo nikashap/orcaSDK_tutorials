@@ -172,7 +172,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
             t_start = time.perf_counter()
             ##
             print("Begin timer test...")
-            start = time.perf_counter()
+
             for i in range(num_samples):
 
                 motor.run()
@@ -187,7 +187,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
                     latencies.append((t_now - t_start) * 1_000_000)
                     t_start = t_now
                     prev_pos = current_pos
-                
+                    
                 ## For testing latencies with single read/writes to registers (not streamed)
                 # read_data = motor.read_write_multiple_registers_blocking(
                 #     read_starting_address = orca_reg.SHAFT_ACCEL_MMPSS,
@@ -242,7 +242,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
 if __name__ == "__main__":
     port="/dev/cu.usbserial-ABA76SF6"
     target_baud = 1000000
-    interframe_delay = 80
+    interframe_delay = 0
 
     # startup_from_default("Startup Motor", port, target_baud, interframe_delay)
     test_serial_ftdi(port, target_baud, interframe_delay)
