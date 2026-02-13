@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-estimate_mass.py
+collect_calibration_data.py
 
 Collect data from the ORCA motor for estimating the effective moving mass of the shaft.
 The motor is commanded with a constant force and the shaft accelerates from the zero
@@ -78,7 +78,7 @@ def auto_zero_motor(motor):
     motor.set_mode(MotorMode.AutoZeroMode)
     motor.clear_errors()
 
-    time.sleep(5)
+    time.sleep(6)
     
     while True:
         motor.run()
