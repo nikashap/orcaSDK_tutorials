@@ -130,7 +130,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         print(f"  Active baud (reg 482-483): {result.value}")
         
         # Latency test
-        num_samples = 100000
+        num_samples = 10000
         print(f"\nMeasuring latency ({num_samples} samples)...")
         latencies = []
         
@@ -179,26 +179,22 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
 
                 #Force control
                 motor.set_streamed_force_mN(force_effect)
-                print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+                # print("Current Sensed Force: " + str(motor.get_stream_data().force), end="        \r")
+
+                ## For testing latencies with single read/writes to registers (not streamed)
+                measured_accel = motor.read_wide_register_blocking(
+                    reg_address=orca_reg.SHAFT_ACCEL_MMPSS,
+                )
                 
                 current_pos = motor.get_stream_data().position
                 if current_pos != prev_pos:  # we know a response actually arrived
+                    # print("Acceleration: " + str(measured_accel.value), end="         \r")
+                    print("Force: "+ str(motor.get_stream_data().force)+ "\tAcceleration: "+ str(measured_accel.value), end="         \r")
+                    ##
                     t_now = time.perf_counter()
                     latencies.append((t_now - t_start) * 1_000_000)
                     t_start = t_now
                     prev_pos = current_pos
-                    
-                ## For testing latencies with single read/writes to registers (not streamed)
-                # read_data = motor.read_write_multiple_registers_blocking(
-                #     read_starting_address = orca_reg.SHAFT_ACCEL_MMPSS,
-                #     read_num_registers = 2,
-                #     write_starting_address = orca_reg.CONSTANT_FORCE_MN,
-                #     write_data = [force_effect_low, force_effect_high]
-                # )
-                # measured_accel = read_data.value[1] << 16 | read_data.value[0]
-                # print()
-                # print("\nAcceleration: " + str(measured_accel), end="        \r")
-                ## 
             
             motor.disable_stream()
             print("="*60)
