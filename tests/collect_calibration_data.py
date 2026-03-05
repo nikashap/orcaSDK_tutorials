@@ -51,8 +51,7 @@ DEFAULT_SERIAL_PORT = "/dev/cu.usbserial-ABA76SF6"
 
 # Data collection range — only record when shaft is in this window
 # (avoids startup transients near zero and deceleration near end-stop)
-MIN_POS_UM = 40_000
-MAX_POS_UM = 160_000
+MAX_POS_UM = 220000
 
 # ---------------------------------------------------------------------------
 # Force levels and repetitions
@@ -280,7 +279,7 @@ def main():
     print(f"  Force levels: {DEFAULT_FORCES_MN} mN")
     print(f"  Iterations per force: {DEFAULT_ITERS_PER_FORCE}")
     print(f"  Total trials: {DEFAULT_ITERS_PER_FORCE * len(DEFAULT_FORCES_MN)}")
-    print(f"  Position window: {MIN_POS_UM} - {MAX_POS_UM} um")
+    print(f"  Position window: {MOTOR_MIN_UM} - {MAX_POS_UM} um")
     print(f"  Output directory: {OUTPUT_DIR}/")
 
     input("\nPress Enter to begin data collection...")

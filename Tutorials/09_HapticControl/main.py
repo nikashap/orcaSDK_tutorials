@@ -1,4 +1,4 @@
-from pyorcasdk import Actuator, MotorMode, MessagePriority, HapticEffect, OscillatorType
+from pyorcasdk import Actuator, MotorMode, MessagePriority, HapticEffect, OscillatorType, SerialFTDI, ChronoClock
 from time import time, sleep
 from math import sin, pi
 
@@ -23,16 +23,19 @@ def set_target_baudrate(motor, target_baud, interframe_delay):
     motor.close_serial_port()
     return
 
-motor = Actuator("MyMotorName")
 
 # Parameters
 port = "/dev/cu.usbserial-ABA76SF6"
-target_baud = 230400
-interframe_delay = 200
+target_baud = 1000000
+interframe_delay = 0
 
-# Set the target baudrate after opening port
-motor.open_serial_port(port)
-set_target_baudrate(motor, target_baud, interframe_delay)
+# # Set the target baudrate after opening port
+# motor.open_serial_port(port)
+# set_target_baudrate(motor, target_baud, interframe_delay)
+
+serial = SerialFTDI(latency_ms=1)
+clock = ChronoClock()
+motor = Actuator(serial, clock, "OrcaMotor", 1)
 
 # Reopen the port
 motor.open_serial_port(port, target_baud, interframe_delay)
@@ -47,13 +50,13 @@ motor.update_haptic_stream_effects(HapticEffect.Osc0 | HapticEffect.Spring0)
 
 motor.set_spring_effect( #Update spring parameters
     0,      #Spring ID (0, 1, or 2)
-    200,    #Spring strength
-    40000   #Center position
+    150,    #Spring strength
+    110000   #Center position, set based off of motor min and motor max
 )
 
 motor.set_osc_effect(
     0,      #Oscillator ID (0 or 1)
-    20,     #Oscillator max force (newtons)
+    15,     #Oscillator max force (newtons)
     10,     #Frequency (decihertz)
     0,      #Duty cycle (not used in sine wave)
     OscillatorType.Sine
