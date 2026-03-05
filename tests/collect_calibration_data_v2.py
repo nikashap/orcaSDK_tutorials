@@ -229,7 +229,7 @@ def collect_data(motor):
 
         n_samples = len(trial_data["t_stream"])
         print(f"  Recorded {n_samples} samples, "
-                f"  Time elapsed: {trial_data["time_elapsed"]} seconds")
+                f"  Time elapsed: {trial_data['time_elapsed']} seconds")
 
         # Save trial data
         filename = f"trial_{trial_num:03d}_sinusoidal.npz"
