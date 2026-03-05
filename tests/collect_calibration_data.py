@@ -36,7 +36,9 @@ import os
 # ---------------------------------------------------------------------------
 # ORCA Motor Parameters
 # ---------------------------------------------------------------------------
-MOTOR_CENTER_UM = 100382
+MOTOR_MIN_UM = 106 #Change these based on AutoZero results from IrisGui
+MOTOR_MAX_UM = 223615
+MOTOR_CENTER_UM = int((MOTOR_MAX_UM - MOTOR_MIN_UM) / 2 + MOTOR_MIN_UM)
 
 # Auto-zero parameters
 AUTO_ZERO_FORCE_N = 30        # max force during auto-zero (Newtons)
@@ -55,11 +57,11 @@ MAX_POS_UM = 160_000
 # ---------------------------------------------------------------------------
 # Force levels and repetitions
 # ---------------------------------------------------------------------------
-DEFAULT_FORCES_MN = [7500, 10000, 12500, 15000]
+DEFAULT_FORCES_MN = [7500, 8750, 10000, 11250, 12500, 13750, 15000]
 DEFAULT_ITERS_PER_FORCE = 5
 
 # Output directory
-OUTPUT_DIR = "mass_estimation_data"
+OUTPUT_DIR = "mass_estimation_data_2026_03_05"
 
 
 def auto_zero_motor(motor):

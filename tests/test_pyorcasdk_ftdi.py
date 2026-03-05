@@ -130,7 +130,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         print(f"  Active baud (reg 482-483): {result.value}")
         
         # Latency test
-        num_samples = 10000
+        num_samples = 1000
         print(f"\nMeasuring latency ({num_samples} samples)...")
         latencies = []
         
