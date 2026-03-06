@@ -257,6 +257,155 @@ def collect_data(motor,
     return trial_index
 
 
+# ---------------------------------------------------------------------------
+# Static friction estimation
+# ---------------------------------------------------------------------------
+FRICTION_FORCE_START_MN = 500       # starting force for ramp (mN)
+FRICTION_FORCE_STEP_MN = 250        # force increment per step (mN)
+FRICTION_FORCE_MAX_MN = 15000       # safety cap (mN)
+FRICTION_SAMPLES_PER_STEP = 20      # readings per force level
+FRICTION_SETTLE_TIME_S = 0.05       # pause after changing force before sampling
+
+# Detection thresholds
+FRICTION_ACCEL_THRESHOLD_MMPSS = 50   # min mean |accel| to count as "moving"
+FRICTION_POS_CHANGE_THRESHOLD_UM = 50 # min position change across a step to count as "moving"
+
+
+def estimate_static_friction(motor):
+    """
+    Ramp commanded force upward in small steps from rest. At each step,
+    take several acceleration and position readings. Detect the force at
+    which the shaft begins to move (static friction breakaway).
+
+    Detection criteria (either triggers a detection):
+      1. Mean |acceleration| exceeds FRICTION_ACCEL_THRESHOLD_MMPSS
+      2. Position changes by more than FRICTION_POS_CHANGE_THRESHOLD_UM
+         across the samples at one force level
+
+    Returns a dict with:
+      - force_levels_mN:    force commanded at each step
+      - mean_accel_mmpss:   mean |accel| at each step
+      - std_accel_mmpss:    std of |accel| at each step
+      - pos_change_um:      total position change at each step
+      - breakaway_force_mN: the force at which motion was first detected (or None)
+      - all_samples:        list of dicts with raw per-step data
+    """
+    motor.set_mode(MotorMode.ForceMode)
+
+    force_levels = []
+    mean_accels = []
+    std_accels = []
+    pos_changes = []
+    all_samples = []
+    breakaway_force = None
+
+    force_mN = FRICTION_FORCE_START_MN
+
+    while force_mN <= FRICTION_FORCE_MAX_MN:
+        motor.set_streamed_force_mN(force_mN)
+
+        # Let force settle
+        for _ in range(5):
+            motor.run()
+        time.sleep(FRICTION_SETTLE_TIME_S)
+
+        # Collect samples at this force level
+        accels = []
+        positions = []
+        for _ in range(FRICTION_SAMPLES_PER_STEP):
+            motor.run()
+            stream_data = motor.get_stream_data()
+            accel = read_raw_acceleration(motor)
+            accels.append(accel)
+            positions.append(stream_data.position)
+
+        accels = np.array(accels, dtype=np.float64)
+        positions = np.array(positions, dtype=np.float64)
+
+        mean_abs_accel = np.mean(np.abs(accels))
+        std_abs_accel = np.std(np.abs(accels))
+        pos_change = abs(positions[-1] - positions[0])
+
+        force_levels.append(force_mN)
+        mean_accels.append(mean_abs_accel)
+        std_accels.append(std_abs_accel)
+        pos_changes.append(pos_change)
+        all_samples.append({
+            "force_mN": force_mN,
+            "accels": accels.copy(),
+            "positions": positions.copy(),
+        })
+
+        moving_by_accel = mean_abs_accel > FRICTION_ACCEL_THRESHOLD_MMPSS
+        moving_by_pos = pos_change > FRICTION_POS_CHANGE_THRESHOLD_UM
+
+        print(f"  Force={force_mN:6d} mN | "
+              f"mean|a|={mean_abs_accel:8.1f} mm/s² | "
+              f"std|a|={std_abs_accel:8.1f} mm/s² | "
+              f"Δpos={pos_change:8.1f} µm | "
+              f"{'*** MOVING ***' if (moving_by_accel or moving_by_pos) else ''}")
+
+        if breakaway_force is None and (moving_by_accel or moving_by_pos):
+            breakaway_force = force_mN
+
+        # Continue past breakaway for a few more steps to capture the transition
+        if breakaway_force is not None and force_mN >= breakaway_force + FRICTION_FORCE_STEP_MN * 3:
+            break
+
+        force_mN += FRICTION_FORCE_STEP_MN
+
+    motor.set_mode(MotorMode.SleepMode)
+
+    return {
+        "force_levels_mN": np.array(force_levels, dtype=np.int32),
+        "mean_accel_mmpss": np.array(mean_accels, dtype=np.float64),
+        "std_accel_mmpss": np.array(std_accels, dtype=np.float64),
+        "pos_change_um": np.array(pos_changes, dtype=np.float64),
+        "breakaway_force_mN": breakaway_force,
+        "all_samples": all_samples,
+    }
+
+
+def collect_friction_estimate(motor):
+    """Run the static friction estimation procedure with auto-zero, save results."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    motor.set_mode(MotorMode.SleepMode)
+    motor.clear_errors()
+    motor.enable_stream()
+
+    print("\n=== Static Friction Estimation ===")
+    print("  Auto-zeroing...")
+    error = auto_zero_motor(motor)
+    if error.value != 0:
+        print(f"  Auto-zero failed with error {error.value}")
+        return None
+
+    motor.enable_stream()
+    time.sleep(0.1)
+
+    print("  Ramping force to find breakaway point...")
+    result = estimate_static_friction(motor)
+
+    # Save results (exclude all_samples list for npz compatibility)
+    filepath = os.path.join(OUTPUT_DIR, "friction_estimate.npz")
+    np.savez(filepath,
+             force_levels_mN=result["force_levels_mN"],
+             mean_accel_mmpss=result["mean_accel_mmpss"],
+             std_accel_mmpss=result["std_accel_mmpss"],
+             pos_change_um=result["pos_change_um"],
+             breakaway_force_mN=result["breakaway_force_mN"] or 0)
+    print(f"\n  Saved friction data: {filepath}")
+
+    if result["breakaway_force_mN"] is not None:
+        print(f"\n  >>> Estimated static friction breakaway force: "
+              f"{result['breakaway_force_mN']} mN <<<")
+    else:
+        print(f"\n  WARNING: No breakaway detected up to {FRICTION_FORCE_MAX_MN} mN")
+
+    return result
+
+
 def main():
     serial_port = input(
         f"Enter serial port [{DEFAULT_SERIAL_PORT}]: "
@@ -282,10 +431,19 @@ def main():
     print(f"  Position window: {MOTOR_MIN_UM} - {MAX_POS_UM} um")
     print(f"  Output directory: {OUTPUT_DIR}/")
 
+    print(f"\nProcedures:")
+    print(f"  1) Mass estimation (constant force trials)")
+    print(f"  2) Static friction estimation (force ramp)")
+    print(f"  3) Both (friction first, then mass estimation)")
+    procedure = input("Select procedure [1/2/3]: ").strip() or "1"
+
     input("\nPress Enter to begin data collection...")
 
     try:
-        trial_index = collect_data(motor)
+        if procedure in ("2", "3"):
+            collect_friction_estimate(motor)
+        if procedure in ("1", "3"):
+            trial_index = collect_data(motor)
     finally:
         print("\nShutting down motor...")
         try:
