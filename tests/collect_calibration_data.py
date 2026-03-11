@@ -56,11 +56,11 @@ MAX_POS_UM = 220000
 # ---------------------------------------------------------------------------
 # Force levels and repetitions
 # ---------------------------------------------------------------------------
-DEFAULT_FORCES_MN = [7500, 8750, 10000, 11250, 12500, 13750, 15000]
+DEFAULT_FORCES_MN = [15000, 16250, 17500, 18750]
 DEFAULT_ITERS_PER_FORCE = 5
 
 # Output directory
-OUTPUT_DIR = "mass_estimation_data_2026_03_05"
+OUTPUT_DIR = "mass_estimation_data_2026_03_06"
 
 
 def auto_zero_motor(motor):
@@ -260,10 +260,10 @@ def collect_data(motor,
 # ---------------------------------------------------------------------------
 # Static friction estimation
 # ---------------------------------------------------------------------------
-FRICTION_FORCE_START_MN = 500       # starting force for ramp (mN)
+FRICTION_FORCE_START_MN = 1000       # starting force for ramp (mN)
 FRICTION_FORCE_STEP_MN = 250        # force increment per step (mN)
 FRICTION_FORCE_MAX_MN = 15000       # safety cap (mN)
-FRICTION_SAMPLES_PER_STEP = 20      # readings per force level
+FRICTION_SAMPLES_PER_STEP = 100      # readings per force level
 FRICTION_SETTLE_TIME_S = 0.05       # pause after changing force before sampling
 
 # Detection thresholds
