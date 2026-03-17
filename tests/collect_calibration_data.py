@@ -36,8 +36,10 @@ import os
 # ---------------------------------------------------------------------------
 # ORCA Motor Parameters
 # ---------------------------------------------------------------------------
-MOTOR_MIN_UM = 106 #Change these based on AutoZero results from IrisGui
-MOTOR_MAX_UM = 223615
+# Change these based on AutoZero results from IrisGui
+MOTOR_MIN_UM = 130
+MOTOR_MAX_UM = 228910
+
 MOTOR_CENTER_UM = int((MOTOR_MAX_UM - MOTOR_MIN_UM) / 2 + MOTOR_MIN_UM)
 
 # Auto-zero parameters
@@ -51,7 +53,8 @@ DEFAULT_SERIAL_PORT = "/dev/cu.usbserial-ABA76SF6"
 
 # Data collection range — only record when shaft is in this window
 # (avoids startup transients near zero and deceleration near end-stop)
-MAX_POS_UM = 220000
+MAX_POS_UM = 180000
+MIN_POS_UM = 20000
 
 # ---------------------------------------------------------------------------
 # Force levels and repetitions
@@ -60,7 +63,7 @@ DEFAULT_FORCES_MN = [15000, 16250, 17500, 18750]
 DEFAULT_ITERS_PER_FORCE = 5
 
 # Output directory
-OUTPUT_DIR = "mass_estimation_data_2026_03_06"
+OUTPUT_DIR = "mass_estimation_data_2026_03_17_test1"
 
 
 def auto_zero_motor(motor):
@@ -109,7 +112,7 @@ def read_raw_acceleration(motor):
 
 def collect_single_trial(motor, force_command_mN):
     """
-    Run one trial: command a constant force and record data until the shaft
+    Run one trial: command a constant force and record data between MIN_POS_UM until the shaft
     reaches MAX_POS_UM.
 
     Returns dict with arrays:
@@ -142,11 +145,12 @@ def collect_single_trial(motor, force_command_mN):
         t2 = time.perf_counter()
 
         # Record ALL data points (we'll filter by position range offline)
-        t_stream_list.append(t1)
-        position_list.append(pos_um)
-        force_list.append(force_mN)
-        t_accel_list.append(t2)
-        accel_list.append(accel_mmpss)
+        if pos_um >= MIN_POS_UM:
+            t_stream_list.append(t1)
+            position_list.append(pos_um)
+            force_list.append(force_mN)
+            t_accel_list.append(t2)
+            accel_list.append(accel_mmpss)
 
         # Check termination
         if pos_um >= MAX_POS_UM:
@@ -261,7 +265,7 @@ def collect_data(motor,
 # Static friction estimation
 # ---------------------------------------------------------------------------
 FRICTION_FORCE_START_MN = 1000       # starting force for ramp (mN)
-FRICTION_FORCE_STEP_MN = 250        # force increment per step (mN)
+FRICTION_FORCE_STEP_MN = 100        # force increment per step (mN)
 FRICTION_FORCE_MAX_MN = 15000       # safety cap (mN)
 FRICTION_SAMPLES_PER_STEP = 100      # readings per force level
 FRICTION_SETTLE_TIME_S = 0.05       # pause after changing force before sampling
@@ -273,9 +277,10 @@ FRICTION_POS_CHANGE_THRESHOLD_UM = 50 # min position change across a step to cou
 
 def estimate_static_friction(motor):
     """
-    Ramp commanded force upward in small steps from rest. At each step,
-    take several acceleration and position readings. Detect the force at
-    which the shaft begins to move (static friction breakaway).
+    Ramp commanded force upward in small steps from rest, with motor
+    starting at MIN_POS_UM.
+    At each step, take several acceleration and position readings.
+    Detect the force at which the shaft begins to move (static friction breakaway).
 
     Detection criteria (either triggers a detection):
       1. Mean |acceleration| exceeds FRICTION_ACCEL_THRESHOLD_MMPSS
@@ -290,6 +295,23 @@ def estimate_static_friction(motor):
       - breakaway_force_mN: the force at which motion was first detected (or None)
       - all_samples:        list of dicts with raw per-step data
     """
+    print(f"\n\n=== 1) Move motor to position {MIN_POS_UM}===\n\n")
+    print(f"Moving motor to position: {MIN_POS_UM}...")
+    motor.set_mode(MotorMode.PositionMode)
+
+    POS_THRESH_UM = 50
+    in_pos_thresh = False
+
+    while not in_pos_thresh:
+        motor.run()
+        motor.set_streamed_position_um(MIN_POS_UM)
+        current_position = motor.get_stream_data().position
+        in_pos_thresh = abs(current_position - MIN_POS_UM) < POS_THRESH_UM
+    ##
+    print(f"Current position: {current_position}")
+    print("Wait 1 second to settle")
+    time.sleep(1)
+    motor.set_mode(MotorMode.SleepMode)
     motor.set_mode(MotorMode.ForceMode)
 
     force_levels = []
@@ -301,6 +323,7 @@ def estimate_static_friction(motor):
 
     force_mN = FRICTION_FORCE_START_MN
 
+    print("\n\n=== 2) Command motor at incremental forces ===\n\n")
     while force_mN <= FRICTION_FORCE_MAX_MN:
         motor.set_streamed_force_mN(force_mN)
 
@@ -428,7 +451,7 @@ def main():
     print(f"  Force levels: {DEFAULT_FORCES_MN} mN")
     print(f"  Iterations per force: {DEFAULT_ITERS_PER_FORCE}")
     print(f"  Total trials: {DEFAULT_ITERS_PER_FORCE * len(DEFAULT_FORCES_MN)}")
-    print(f"  Position window: {MOTOR_MIN_UM} - {MAX_POS_UM} um")
+    print(f"  Position window: {MIN_POS_UM} - {MAX_POS_UM} um")
     print(f"  Output directory: {OUTPUT_DIR}/")
 
     print(f"\nProcedures:")
