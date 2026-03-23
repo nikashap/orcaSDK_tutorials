@@ -284,9 +284,10 @@ def collect_data(motor,
 
 def estimate_static_friction(motor):
     """
-    Ramp commanded force upward in small steps from rest. At each step,
-    take several acceleration and position readings. Detect the force at
-    which the shaft begins to move (static friction breakaway).
+    Ramp commanded force upward in small steps from rest, with motor
+    starting at MIN_POS_UM.
+    At each step, take several acceleration and position readings.
+    Detect the force at which the shaft begins to move (static friction breakaway).
 
     Detection criteria (either triggers a detection):
       1. Mean |acceleration| exceeds FRICTION_ACCEL_THRESHOLD_MMPSS
@@ -309,6 +310,7 @@ def estimate_static_friction(motor):
 
     force_mN = FRICTION_FORCE_START_MN
 
+    print("\n\n=== 2) Command motor at incremental forces ===\n\n")
     while force_mN <= FRICTION_FORCE_MAX_MN:
         motor.set_streamed_force_mN(force_mN)
 
