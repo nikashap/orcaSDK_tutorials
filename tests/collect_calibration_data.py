@@ -25,6 +25,7 @@ Usage:
 
 from pyorcasdk import Actuator, SerialFTDI, ChronoClock, MotorMode
 import pyorcasdk.orca_registers as orca_reg
+from datetime import datetime
 import time
 import numpy as np
 import os
@@ -40,7 +41,6 @@ _PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
 with open(_PARAMS_PATH, "r") as f:
     PARAMS = yaml.safe_load(f)
 
-# Unpack frequently used values
 MOTOR_MIN_UM = PARAMS["motor_min_um"]
 MOTOR_MAX_UM = PARAMS["motor_max_um"]
 EXPERIMENT_MAX_POS_UM = PARAMS["experiment_max_pos_um"]
@@ -56,7 +56,8 @@ DEFAULT_FORCES_MN = PARAMS["force_levels_mN"]
 DEFAULT_ITERS_PER_FORCE = PARAMS["iterations_per_force"]
 
 # Resolve data directory relative to the script location
-DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, PARAMS["data_dir"]))
+DATE_STR = datetime.now().strftime('%y_%m_%d-%H_%M_%S')
+DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, PARAMS["data_dir"], DATE_STR))
 
 # Static friction parameters
 FRICTION_FORCE_START_MN = PARAMS["friction_force_start_mN"]
@@ -112,7 +113,7 @@ def read_raw_acceleration(motor):
     return accel_data.value
 
 
-def collect_single_trial(motor, force_command_mN):
+def run_single_trial(motor, force_command_mN):
     """
     Run one trial: command a constant force and record data until the shaft
     reaches EXPERIMENT_MAX_POS_UM.
@@ -215,7 +216,7 @@ def collect_data(motor,
                 time.sleep(0.1)
 
                 print(f"  Collecting data (force={force_mN} mN)...")
-                trial_data = collect_single_trial(motor, force_mN)
+                trial_data = run_single_trial(motor, force_mN)
 
                 n_samples = len(trial_data["t_stream"])
                 print(f"  Recorded {n_samples} samples, "
@@ -243,7 +244,7 @@ def collect_data(motor,
         motor.set_mode(MotorMode.SleepMode)
 
     # --- Save everything to one master file ---
-    filepath = os.path.join(DATA_DIR, "calibration_mass_estimation.npz")
+    filepath = os.path.join(DATA_DIR, "calibration_dynamic_friction.npz")
 
     # Compute trial boundaries (cumulative sum of n_samples)
     trial_n_samples_arr = np.array(trial_n_samples, dtype=np.int32)
@@ -282,7 +283,7 @@ def collect_data(motor,
 # Static friction estimation
 # ---------------------------------------------------------------------------
 
-def estimate_static_friction(motor):
+def run_static_friction_procedure(motor):
     """
     Ramp commanded force upward in small steps from rest, with motor
     starting at MIN_POS_UM.
@@ -371,7 +372,7 @@ def estimate_static_friction(motor):
     }
 
 
-def collect_friction_estimate(motor):
+def collect_static_friction_data(motor):
     """Run the static friction estimation procedure with auto-zero, save results."""
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -390,7 +391,7 @@ def collect_friction_estimate(motor):
     time.sleep(0.1)
 
     print("  Ramping force to find breakaway point...")
-    result = estimate_static_friction(motor)
+    result = run_static_friction_procedure(motor)
 
     # Save to separate file
     filepath = os.path.join(DATA_DIR, "calibration_static_friction.npz")
@@ -461,7 +462,7 @@ def main():
 
     try:
         if procedure in ("2", "3"):
-            collect_friction_estimate(motor)
+            collect_static_friction_data(motor)
         if procedure in ("1", "3"):
             collect_data(motor)
     finally:
