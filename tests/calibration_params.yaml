@@ -7,7 +7,6 @@
 # ---------------------------------------------------------------------------
 mass_shaft_kg: 3.761                # measured mass of the motor shaft (kg)
 shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inches)
-# shaft_absolute_length_meters is derived automatically: inches * 0.0254
 
 # ---------------------------------------------------------------------------
 # Motor position range (from AutoZero / IrisGui)
@@ -15,8 +14,7 @@ shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inc
 motor_min_um: 106                   # minimum shaft position (micrometers)
 motor_max_um: 223615                # maximum shaft position (micrometers)
 
-# Experiment position window — data is collected within this range
-# (avoids startup transients near zero and deceleration near end-stop)
+# Experiment position window — calibration data is collected within this range
 experiment_min_pos_um: 106          # start of usable range (micrometers)
 experiment_max_pos_um: 220000       # end of usable range (micrometers)
 
@@ -53,7 +51,7 @@ friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 # ---------------------------------------------------------------------------
 # Data output
 # ---------------------------------------------------------------------------
-data_dir: "../data"                 # relative to the tests/ directory
+data_dir: "../data"
 
 # ---------------------------------------------------------------------------
 # Analysis: Savitzky-Golay velocity estimation

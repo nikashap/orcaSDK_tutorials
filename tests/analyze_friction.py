@@ -3,31 +3,52 @@
 analyze_friction.py
 
 Analyze calibration data to produce:
-  1) Velocity over time graph (per force level)
+  1) Velocity over time graph (per force level). The velocity is a smoothed estimate from 
+    noisy position derivatives
   2) Stribeck curve (μ_d vs shaft speed)
   3) Augmented data file with friction coefficient estimates appended
 
 All parameters are read from calibration_params.yaml.
 
 Usage:
-  python analyze_friction.py
-  python analyze_friction.py --data path/to/calibration_mass_estimation.npz
+  python analyze_friction.py --date 26_03_20-14_30_00
+  python analyze_friction.py --date 26_03_20-14_30_00 --data path/to/calibration_dynamic_friction.npz
 """
 
 import argparse
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 import yaml
 
-
 # ---------------------------------------------------------------------------
-# Load parameters from YAML
+# Parse CLI arguments (needed before loading YAML)
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
+
+_parser = argparse.ArgumentParser(description="Analyze ORCA friction calibration data")
+_parser.add_argument("--date", type=str, required=True,
+                     help="Date folder name of the experiment (e.g. '26_03_20-14_30_00'). "
+                          "The YAML and data files are loaded from <data_dir>/<date>/")
+_parser.add_argument("--data", type=str, default=None,
+                     help="Override path to calibration_dynamic_friction.npz")
+_args = _parser.parse_args()
+
+# ---------------------------------------------------------------------------
+# Resolve experiment directory and load the saved YAML snapshot
+# ---------------------------------------------------------------------------
+# Base data dir is relative to script; the date subfolder identifies the experiment
+_BASE_DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, "../data"))
+EXPERIMENT_DIR = os.path.join(_BASE_DATA_DIR, _args.date)
+
+_PARAMS_PATH = os.path.join(EXPERIMENT_DIR, "calibration_params.yaml")
+if not os.path.exists(_PARAMS_PATH):
+    print(f"ERROR: No calibration_params.yaml found in {EXPERIMENT_DIR}")
+    print("Make sure you collected data with collect_calibration_data.py first.")
+    sys.exit(1)
 
 with open(_PARAMS_PATH, "r") as f:
     PARAMS = yaml.safe_load(f)
@@ -41,8 +62,6 @@ SAVGOL_ORDER = PARAMS["savgol_order"]
 T_IGNORE_S = PARAMS["t_ignore_s"]
 F_STATIC_LOW_MN = PARAMS["static_friction_low_mN"]
 F_STATIC_HIGH_MN = PARAMS["static_friction_high_mN"]
-
-DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, PARAMS["data_dir"]))
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +249,7 @@ def save_augmented_data(filepath_in, friction_trials):
 
     # Save alongside the original
     dir_name = os.path.dirname(filepath_in)
-    out_path = os.path.join(dir_name, "calibration_mass_estimation_with_friction.npz")
+    out_path = os.path.join(dir_name, "stribeck_data.npz")
     np.savez(out_path, **out)
     print(f"Saved augmented data: {out_path}")
     return out_path
@@ -241,13 +260,7 @@ def save_augmented_data(filepath_in, friction_trials):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze ORCA friction calibration data")
-    parser.add_argument("--data", type=str, default=None,
-                        help="Path to calibration_mass_estimation.npz "
-                             "(default: <data_dir>/calibration_mass_estimation.npz)")
-    args = parser.parse_args()
-
-    data_path = args.data or os.path.join(DATA_DIR, "calibration_mass_estimation.npz")
+    data_path = _args.data or os.path.join(EXPERIMENT_DIR, "calibration_dynamic_friction.npz")
 
     if not os.path.exists(data_path):
         print(f"ERROR: Data file not found: {data_path}")
@@ -271,14 +284,14 @@ def main():
     # --- Plot 1: Velocity over time ---
     print("\nGenerating velocity over time plot...")
     fig_vel = plot_velocity_over_time(friction_trials, force_levels)
-    vel_path = os.path.join(DATA_DIR, "velocity_over_time.png")
+    vel_path = os.path.join(EXPERIMENT_DIR, "velocity_over_time.png")
     fig_vel.savefig(vel_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {vel_path}")
 
     # --- Plot 2: Stribeck curve ---
     print("Generating Stribeck curve...")
     fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
-    stribeck_path = os.path.join(DATA_DIR, "stribeck_curve.png")
+    stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
     fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_path}")
 

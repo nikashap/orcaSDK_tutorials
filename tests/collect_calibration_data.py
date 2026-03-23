@@ -56,6 +56,7 @@ DEFAULT_FORCES_MN = PARAMS["force_levels_mN"]
 DEFAULT_ITERS_PER_FORCE = PARAMS["iterations_per_force"]
 
 # Resolve data directory relative to the script location
+# NOTE: I made a more specific directoy for the date at which data is collected
 DATE_STR = datetime.now().strftime('%y_%m_%d-%H_%M_%S')
 DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, PARAMS["data_dir"], DATE_STR))
 
@@ -473,8 +474,14 @@ def main():
             motor.close_serial_port()
         except Exception as e:
             print(f"  Warning during cleanup: {e}")
-        print("Done.")
 
+        # Save a copy of the parameters used for this experiment
+        os.makedirs(DATA_DIR, exist_ok=True)
+        params_copy_path = os.path.join(DATA_DIR, "calibration_params.yaml")
+        with open(params_copy_path, "w") as f:
+            yaml.dump(PARAMS, f, default_flow_style=False, sort_keys=False)
+        print(f"Saved parameters snapshot: {params_copy_path}")
+        print("Done.")
 
 if __name__ == "__main__":
     main()
