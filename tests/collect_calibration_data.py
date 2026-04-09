@@ -391,6 +391,25 @@ def collect_static_friction_data(motor):
     motor.enable_stream()
     time.sleep(0.1)
 
+    # Move to experiment_min_pos_um before starting the friction ramp
+    target_pos_um = PARAMS["experiment_min_pos_um"]
+    pos_tolerance_um = 200
+    print(f"  Moving to experiment start position ({target_pos_um} µm)...")
+    motor.set_mode(MotorMode.PositionMode)
+    motor.set_streamed_position_um(target_pos_um)
+
+    while True:
+        motor.run()
+        stream_data = motor.get_stream_data()
+        current_pos_um = stream_data.position
+        if abs(current_pos_um - target_pos_um) <= pos_tolerance_um:
+            break
+        time.sleep(0.005)
+
+    motor.set_mode(MotorMode.SleepMode)
+    print(f"  Reached start position ({current_pos_um} µm).")
+    time.sleep(0.2)
+
     print("  Ramping force to find breakaway point...")
     result = run_static_friction_procedure(motor)
 
