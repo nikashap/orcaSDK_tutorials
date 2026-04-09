@@ -5,18 +5,18 @@
 # ---------------------------------------------------------------------------
 # Shaft physical properties
 # ---------------------------------------------------------------------------
-mass_shaft_kg: 3.761                # measured mass of the motor shaft (kg)
+mass_shaft_kg: 4.00                # measured mass of the motor shaft (kg)
 shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inches)
 
 # ---------------------------------------------------------------------------
 # Motor position range (from AutoZero / IrisGui)
 # ---------------------------------------------------------------------------
-motor_min_um: 106                   # minimum shaft position (micrometers)
-motor_max_um: 223615                # maximum shaft position (micrometers)
+motor_min_um: 300                   # minimum shaft position (micrometers)
+motor_max_um: 663870                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
-experiment_min_pos_um: 106          # start of usable range (micrometers)
-experiment_max_pos_um: 220000       # end of usable range (micrometers)
+experiment_min_pos_um: 40000          # start of usable range (micrometers)
+experiment_max_pos_um: 503000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
 # Communication
@@ -28,20 +28,20 @@ default_serial_port: "/dev/cu.usbserial-ABA76SF6"
 # ---------------------------------------------------------------------------
 # Auto-zero
 # ---------------------------------------------------------------------------
-auto_zero_force_n: 30               # max force during auto-zero (Newtons)
-auto_zero_speed_mmps: 50            # max speed during auto-zero (mm/s)
+auto_zero_force_n: 50               # max force during auto-zero (Newtons)
+auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [15000, 16250, 17500, 18750]
+force_levels_mN: [5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000]
 iterations_per_force: 5
 
 # ---------------------------------------------------------------------------
 # Static friction estimation (force ramp procedure)
 # ---------------------------------------------------------------------------
 friction_force_start_mN: 1000       # starting force for ramp
-friction_force_step_mN: 250         # force increment per step
+friction_force_step_mN: 100         # force increment per step
 friction_force_max_mN: 15000        # safety cap
 friction_samples_per_step: 100      # readings per force level
 friction_settle_time_s: 0.05        # pause after changing force before sampling

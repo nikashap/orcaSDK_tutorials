@@ -102,7 +102,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
     print("=" * 60)
     
     # Create SerialFTDI with 1ms latency
-    serial = SerialFTDI(latency_ms=1)
+    serial = SerialFTDI(latency_ms=1, usb_in_size=64, usb_out_size=64) #NOTE: changed to 0 ms for the 232H chip
     clock = ChronoClock()
     
     # Create Actuator with custom serial interface
@@ -130,7 +130,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         print(f"  Active baud (reg 482-483): {result.value}")
         
         # Latency test
-        num_samples = 1000
+        num_samples = 10000
         print(f"\nMeasuring latency ({num_samples} samples)...")
         latencies = []
         
@@ -156,7 +156,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
             ## Wait for stream to initialize and receive first valid response
             print("Initializing stream...")
             initialized = False
-            for _ in range(1000):  # Try for up to 1 second
+            for _ in range(10000):  # Try for up to 1 second
                 motor.run()
                 # Check if we've received a response (gap will be small after first response)
                 if motor.time_since_last_response_microseconds() < 100000:  # < 100ms
@@ -174,6 +174,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
             print("Begin timer test...")
 
             for i in range(num_samples):
+                print("Iter number: " + str(i), end=".       \r")
 
                 motor.run()
 
@@ -190,6 +191,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
                 if current_pos != prev_pos:  # we know a response actually arrived
                     # print("Acceleration: " + str(measured_accel.value), end="         \r")
                     print("Force: "+ str(motor.get_stream_data().force)+ "\tAcceleration: "+ str(measured_accel.value), end="         \r")
+                    # print("Force: "+ str(motor.get_stream_data().force), end="         \r")
                     ##
                     t_now = time.perf_counter()
                     latencies.append((t_now - t_start) * 1_000_000)
@@ -237,8 +239,9 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
 
 if __name__ == "__main__":
     port="/dev/cu.usbserial-ABA76SF6"
+    # port="/dev/cu.usbserial-1460"
     target_baud = 1000000
     interframe_delay = 0
 
     # startup_from_default("Startup Motor", port, target_baud, interframe_delay)
-    test_serial_ftdi(port, target_baud, interframe_delay)
+    test_serial_ftdi(port, target_baud, interframe_delay, test_stream=True)
