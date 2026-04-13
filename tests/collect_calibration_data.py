@@ -115,6 +115,49 @@ def read_raw_acceleration(motor):
     return accel_data.value
 
 
+EXPERIMENT_MID_POS_UM = (EXPERIMENT_MIN_POS_UM + EXPERIMENT_MAX_POS_UM) // 2
+
+
+def move_to_position(motor, target_pos_um, duration_s=2.0, pos_tolerance_um=200):
+    """
+    Move the motor to ``target_pos_um`` by streaming a smooth linear ramp of
+    position setpoints over ``duration_s`` seconds, then hold until the shaft
+    is within ``pos_tolerance_um`` of the target.
+
+    The motor must already have streaming enabled before calling this function.
+    On return the motor is placed back into SleepMode.
+    """
+    # Read current position
+    motor.set_mode(MotorMode.PositionMode)
+    motor.run()
+    stream_data = motor.get_stream_data()
+    start_pos_um = stream_data.position
+
+    n_steps = max(int(duration_s / 0.005), 1)  # ~5 ms per step
+    dt = duration_s / n_steps
+
+    print(f"  Moving {start_pos_um} → {target_pos_um} µm over {duration_s:.1f} s "
+          f"({n_steps} steps)...")
+
+    for i in range(1, n_steps + 1):
+        frac = i / n_steps
+        interp_pos = int(start_pos_um + frac * (target_pos_um - start_pos_um))
+        motor.set_streamed_position_um(interp_pos)
+        motor.run()
+        time.sleep(dt)
+
+    # Hold at target until within tolerance
+    while True:
+        motor.run()
+        stream_data = motor.get_stream_data()
+        if abs(stream_data.position - target_pos_um) <= pos_tolerance_um:
+            break
+        time.sleep(0.005)
+
+    motor.set_mode(MotorMode.SleepMode)
+    print(f"  Reached position ({stream_data.position} µm).")
+
+
 def run_single_trial(motor, force_command_mN):
     """
     Run one trial: command a constant force and record data until the shaft
@@ -225,20 +268,9 @@ def collect_data(motor,
                     motor.enable_stream()
                     time.sleep(0.3)
                 else:
-                    # Negative force: move to experiment_max_pos_um via
-                    # PositionMode, then force drives it toward min
-                    print(f"  Moving to start position ({EXPERIMENT_MAX_POS_UM} µm)...")
-                    motor.set_mode(MotorMode.PositionMode)
-                    motor.set_streamed_position_um(EXPERIMENT_MAX_POS_UM)
-                    pos_tolerance_um = 200
-                    while True:
-                        motor.run()
-                        stream_data = motor.get_stream_data()
-                        if abs(stream_data.position - EXPERIMENT_MAX_POS_UM) <= pos_tolerance_um:
-                            break
-                        time.sleep(0.005)
-                    motor.set_mode(MotorMode.SleepMode)
-                    print(f"  Reached start position ({stream_data.position} µm).")
+                    # Negative force: smoothly move to experiment_max_pos_um,
+                    # then force drives it toward min
+                    move_to_position(motor, EXPERIMENT_MAX_POS_UM)
                     time.sleep(0.3)
 
                 print(f"  Collecting data (force={force_mN} mN)...")
@@ -309,12 +341,17 @@ def collect_data(motor,
 # Static friction estimation
 # ---------------------------------------------------------------------------
 
-def run_static_friction_procedure(motor):
+def run_static_friction_procedure(motor, force_sign=1):
     """
-    Ramp commanded force upward in small steps from rest, with motor
-    starting at MIN_POS_UM.
+    Ramp commanded force upward in small steps from rest.
     At each step, take several acceleration and position readings.
     Detect the force at which the shaft begins to move (static friction breakaway).
+
+    Parameters
+    ----------
+    motor : Actuator
+    force_sign : int
+        +1 for positive force ramp, -1 for negative force ramp.
 
     Detection criteria (either triggers a detection):
       1. Mean |acceleration| exceeds FRICTION_ACCEL_THRESHOLD_MMPSS
@@ -335,10 +372,11 @@ def run_static_friction_procedure(motor):
     all_step_positions = []
     breakaway_force = None
 
-    force_mN = FRICTION_FORCE_START_MN
+    force_magnitude = FRICTION_FORCE_START_MN
 
-    print("\n\n=== 2) Command motor at incremental forces ===\n\n")
-    while force_mN <= FRICTION_FORCE_MAX_MN:
+    print(f"\n\n=== Command motor at incremental forces (sign={force_sign:+d}) ===\n\n")
+    while force_magnitude <= FRICTION_FORCE_MAX_MN:
+        force_mN = force_sign * force_magnitude
         motor.set_streamed_force_mN(force_mN)
 
         for _ in range(5):
@@ -380,10 +418,10 @@ def run_static_friction_procedure(motor):
         if breakaway_force is None and (moving_by_accel or moving_by_pos):
             breakaway_force = force_mN
 
-        if breakaway_force is not None and force_mN >= breakaway_force + FRICTION_FORCE_STEP_MN * 3:
+        if breakaway_force is not None and force_magnitude >= abs(breakaway_force) + FRICTION_FORCE_STEP_MN * 3:
             break
 
-        force_mN += FRICTION_FORCE_STEP_MN
+        force_magnitude += FRICTION_FORCE_STEP_MN
 
     motor.set_mode(MotorMode.SleepMode)
 
@@ -398,50 +436,8 @@ def run_static_friction_procedure(motor):
     }
 
 
-def collect_static_friction_data(motor):
-    """Run the static friction estimation procedure with auto-zero, save results."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    motor.set_mode(MotorMode.SleepMode)
-    motor.clear_errors()
-    motor.enable_stream()
-
-    print("\n=== Static Friction Estimation ===")
-    print("  Auto-zeroing...")
-    error = auto_zero_motor(motor)
-    if error.value != 0:
-        print(f"  Auto-zero failed with error {error.value}")
-        return None
-
-    motor.enable_stream()
-    time.sleep(0.1)
-
-    # Move to experiment_min_pos_um before starting the friction ramp
-    target_pos_um = PARAMS["experiment_min_pos_um"]
-    pos_tolerance_um = 200
-    print(f"  Moving to experiment start position ({target_pos_um} µm)...")
-    motor.set_mode(MotorMode.PositionMode)
-    motor.set_streamed_position_um(target_pos_um)
-
-    while True:
-        motor.run()
-        stream_data = motor.get_stream_data()
-        current_pos_um = stream_data.position
-        if abs(current_pos_um - target_pos_um) <= pos_tolerance_um:
-            break
-        time.sleep(0.005)
-
-    motor.set_mode(MotorMode.SleepMode)
-    print(f"  Reached start position ({current_pos_um} µm).")
-    time.sleep(2.0)
-
-    print("  Ramping force to find breakaway point...")
-    result = run_static_friction_procedure(motor)
-
-    # Save to separate file
-    filepath = os.path.join(DATA_DIR, "calibration_static_friction.npz")
-
-    # Pack per-step raw samples as 2D arrays (padded to max step length)
+def _save_static_friction_result(result, start_pos_um, label, filepath):
+    """Pack one static friction result into a .npz file."""
     max_step_len = max(len(a) for a in result["all_step_accels"])
     n_steps = len(result["all_step_accels"])
     step_accels_2d = np.full((n_steps, max_step_len), np.nan, dtype=np.float64)
@@ -453,6 +449,7 @@ def collect_static_friction_data(motor):
 
     np.savez(
         filepath,
+        start_pos_um=start_pos_um,
         force_levels_mN=result["force_levels_mN"],
         mean_accel_mmpss=result["mean_accel_mmpss"],
         std_accel_mmpss=result["std_accel_mmpss"],
@@ -462,15 +459,69 @@ def collect_static_friction_data(motor):
         step_positions=step_positions_2d,
         samples_per_step=FRICTION_SAMPLES_PER_STEP,
     )
-    print(f"\n  Saved friction data: {filepath}")
+    print(f"\n  Saved friction data ({label}): {filepath}")
 
     if result["breakaway_force_mN"] is not None:
-        print(f"\n  >>> Estimated static friction breakaway force: "
+        print(f"  >>> Breakaway force ({label}): "
               f"{result['breakaway_force_mN']} mN <<<")
     else:
-        print(f"\n  WARNING: No breakaway detected up to {FRICTION_FORCE_MAX_MN} mN")
+        print(f"  WARNING: No breakaway detected ({label}) up to "
+              f"±{FRICTION_FORCE_MAX_MN} mN")
 
-    return result
+
+def collect_static_friction_data(motor):
+    """
+    Estimate static friction at three shaft positions:
+      1) experiment_min_pos_um  — positive force ramp (current logic)
+      2) experiment_mid_pos_um  — positive force ramp
+      3) experiment_max_pos_um  — negative force ramp
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    motor.set_mode(MotorMode.SleepMode)
+    motor.clear_errors()
+    motor.enable_stream()
+
+    print("\n=== Static Friction Estimation ===")
+    print("  Auto-zeroing first...")
+    error = auto_zero_motor(motor)
+    if error.value != 0:
+        print(f"  Auto-zero failed with error {error.value}")
+        return None
+
+    motor.enable_stream()
+    time.sleep(0.1)
+
+    # Define the three test points: (position, force_sign, label)
+    test_points = [
+        (EXPERIMENT_MIN_POS_UM, +1, "min_pos"),
+        (EXPERIMENT_MID_POS_UM, +1, "mid_pos"),
+        (EXPERIMENT_MAX_POS_UM, -1, "max_pos"),
+    ]
+
+    results = {}
+
+    for target_pos_um, force_sign, label in test_points:
+        print(f"\n--- Static friction at {label} ({target_pos_um} µm, "
+              f"force_sign={force_sign:+d}) ---")
+
+        move_to_position(motor, target_pos_um)
+        motor.enable_stream()
+        time.sleep(2.0)
+
+        print("  Ramping force to find breakaway point...")
+        result = run_static_friction_procedure(motor, force_sign=force_sign)
+
+        filepath = os.path.join(DATA_DIR, f"calibration_static_friction_{label}.npz")
+        _save_static_friction_result(result, target_pos_um, label, filepath)
+
+        results[label] = result
+
+        # Re-enable stream for next move
+        motor.enable_stream()
+        time.sleep(0.3)
+
+    return results
 
 
 def main():
