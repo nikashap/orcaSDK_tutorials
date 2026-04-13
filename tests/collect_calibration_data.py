@@ -122,7 +122,7 @@ def advance_motor_stream(motor, frames=4, sleeptime=0.002):
         motor.run()
         time.sleep(sleeptime)
 
-def move_to_position(motor, target_pos_um, duration_s=2.0, pos_tolerance_um=200):
+def move_to_position(motor, target_pos_um, duration_s=1.0, pos_tolerance_um=200):
     """
     Move the motor to ``target_pos_um`` by streaming a smooth linear ramp of
     position setpoints over ``duration_s`` seconds, then hold until the shaft
@@ -134,6 +134,9 @@ def move_to_position(motor, target_pos_um, duration_s=2.0, pos_tolerance_um=200)
     # Read current position — drain stale frames first so start_pos_um is
     # accurate.  The first call sets PositionMode with the current position
     # (hold in place), then subsequent calls flush the stale stream data.
+
+    # TODO: actually just use Force mode to command a constant force until bypass
+    # desired set point, then use PositionMode for minor corrections
     motor.set_mode(MotorMode.PositionMode)
     advance_motor_stream(motor)
     stream_data = motor.get_stream_data()
@@ -507,8 +510,9 @@ def collect_static_friction_data(motor):
     
     test_points_params = []
     for i, tp in enumerate(test_points):
-        force_sign = -1 if tp > EXPERIMENT_MID_POS_UM else +1
-        test_points_params.append((int(tp), force_sign, str(i)))
+        # force_sign = -1 if tp > EXPERIMENT_MID_POS_UM else +1
+        test_points_params.append((int(tp), +1, str(i)))
+        test_points_params.append((int(tp), -1, str(i)))
 
     results = {}
 

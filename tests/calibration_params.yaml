@@ -16,7 +16,7 @@ motor_max_um: 670000                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
 experiment_min_pos_um: 40000          # start of usable range (micrometers)
-experiment_max_pos_um: 630000       # end of usable range (micrometers)
+experiment_max_pos_um: 550000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
 # Communication
@@ -35,7 +35,7 @@ auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [7700, -7700, 7800, -7800, 7900, -7900, 8000, -8000]
+force_levels_mN: [-7700, -8500, -9000, -9500, -10000, -10500]
 # force_levels_mN: [14000, 15000]
 iterations_per_force: 3
 

@@ -121,7 +121,7 @@ def compute_friction_for_trial(trial, savgol_window, savgol_order, shift=0):
     For one trial, compute:
       - velocity (Savitzky-Golay smoothed position, then finite differences)
       - F_friction = F_sensed_shifted - m * a
-      - mu_d = F_friction / (m * g)
+      - mu_d = abs(F_friction) / (m * g)
 
     The `shift` parameter aligns the force_sensed data with the acceleration
     data to account for USB readback latency. A positive shift means force_mN
