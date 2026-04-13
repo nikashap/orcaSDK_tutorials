@@ -131,11 +131,18 @@ def move_to_position(motor, target_pos_um, duration_s=2.0, pos_tolerance_um=200)
     The motor must already have streaming enabled before calling this function.
     On return the motor is placed back into SleepMode.
     """
-    # Read current position
+    # Read current position — drain stale frames first so start_pos_um is
+    # accurate.  The first call sets PositionMode with the current position
+    # (hold in place), then subsequent calls flush the stale stream data.
     motor.set_mode(MotorMode.PositionMode)
-    motor.run()
+    advance_motor_stream(motor)
     stream_data = motor.get_stream_data()
     start_pos_um = stream_data.position
+
+    # Command motor to hold at current position while we begin the ramp,
+    # preventing any jump from a stale setpoint.
+    motor.set_streamed_position_um(start_pos_um)
+    motor.run()
 
     n_steps = max(int(duration_s / 0.005), 1)  # ~5 ms per step
     dt = duration_s / n_steps
