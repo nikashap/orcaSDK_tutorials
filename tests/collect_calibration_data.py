@@ -43,6 +43,7 @@ with open(_PARAMS_PATH, "r") as f:
 
 MOTOR_MIN_UM = PARAMS["motor_min_um"]
 MOTOR_MAX_UM = PARAMS["motor_max_um"]
+EXPERIMENT_MIN_POS_UM = PARAMS["experiment_min_pos_um"]
 EXPERIMENT_MAX_POS_UM = PARAMS["experiment_max_pos_um"]
 
 AUTO_ZERO_FORCE_N = PARAMS["auto_zero_force_n"]
@@ -86,7 +87,7 @@ def auto_zero_motor(motor):
     motor.set_mode(MotorMode.AutoZeroMode)
     motor.clear_errors()
 
-    time.sleep(6)
+    time.sleep(6) #Autozero needs to complete within 6 seconds
 
     while True:
         motor.run()
@@ -117,7 +118,10 @@ def read_raw_acceleration(motor):
 def run_single_trial(motor, force_command_mN):
     """
     Run one trial: command a constant force and record data until the shaft
-    reaches EXPERIMENT_MAX_POS_UM.
+    reaches the end of its travel.
+
+    For positive forces the shaft travels toward EXPERIMENT_MAX_POS_UM.
+    For negative forces the shaft travels toward EXPERIMENT_MIN_POS_UM.
 
     Returns dict with arrays:
         t_stream, position_um, force_mN, t_accel, accel_mmpss, force_commanded_mN
@@ -131,9 +135,9 @@ def run_single_trial(motor, force_command_mN):
     motor.set_mode(MotorMode.ForceMode)
     motor.set_streamed_force_mN(force_command_mN)
 
-    reached_max = False
+    reached_end = False
 
-    while not reached_max:
+    while not reached_end:
         motor.run()
         t1 = time.perf_counter()
 
@@ -150,8 +154,10 @@ def run_single_trial(motor, force_command_mN):
         t_accel_list.append(t2)
         accel_list.append(accel_mmpss)
 
-        if pos_um >= EXPERIMENT_MAX_POS_UM:
-            reached_max = True
+        if force_command_mN >= 0 and pos_um >= EXPERIMENT_MAX_POS_UM:
+            reached_end = True
+        elif force_command_mN < 0 and pos_um <= EXPERIMENT_MIN_POS_UM:
+            reached_end = True
 
         if stream_data.errors:
             print(f"    Motor error: {stream_data.errors}")
@@ -207,14 +213,33 @@ def collect_data(motor,
                 print(f"\n--- Trial {trial_num}/{total_trials}: "
                       f"force={force_mN} mN, iter={iteration+1}/{iters_per_force} ---")
 
-                print("  Auto-zeroing...")
-                error = auto_zero_motor(motor)
-                if error.value != 0:
-                    print(f"  WARNING: Auto-zero returned error {error.value}, skipping trial.")
-                    continue
+                if force_mN >= 0:
+                    # Positive force: auto-zero moves shaft to min position,
+                    # then force drives it toward max
+                    print("  Auto-zeroing...")
+                    error = auto_zero_motor(motor)
+                    if error.value != 0:
+                        print(f"  WARNING: Auto-zero returned error {error.value}, skipping trial.")
+                        continue
 
-                motor.enable_stream()
-                time.sleep(0.1)
+                    motor.enable_stream()
+                    time.sleep(0.3)
+                else:
+                    # Negative force: move to experiment_max_pos_um via
+                    # PositionMode, then force drives it toward min
+                    print(f"  Moving to start position ({EXPERIMENT_MAX_POS_UM} µm)...")
+                    motor.set_mode(MotorMode.PositionMode)
+                    motor.set_streamed_position_um(EXPERIMENT_MAX_POS_UM)
+                    pos_tolerance_um = 200
+                    while True:
+                        motor.run()
+                        stream_data = motor.get_stream_data()
+                        if abs(stream_data.position - EXPERIMENT_MAX_POS_UM) <= pos_tolerance_um:
+                            break
+                        time.sleep(0.005)
+                    motor.set_mode(MotorMode.SleepMode)
+                    print(f"  Reached start position ({stream_data.position} µm).")
+                    time.sleep(0.3)
 
                 print(f"  Collecting data (force={force_mN} mN)...")
                 trial_data = run_single_trial(motor, force_mN)
