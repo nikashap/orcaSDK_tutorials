@@ -20,6 +20,7 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
 import yaml
@@ -62,6 +63,8 @@ SAVGOL_ORDER = PARAMS["savgol_order"]
 T_IGNORE_S = PARAMS["t_ignore_s"]
 F_STATIC_LOW_MN = PARAMS["static_friction_low_mN"]
 F_STATIC_HIGH_MN = PARAMS["static_friction_high_mN"]
+STREAM_FORCE_SHIFT = PARAMS.get("stream_force_shift", 0)
+USB_CHIP = PARAMS.get("usb_chip", "unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -113,14 +116,22 @@ def load_master_data(filepath):
 # Friction computation
 # ---------------------------------------------------------------------------
 
-def compute_friction_for_trial(trial, savgol_window, savgol_order):
+def compute_friction_for_trial(trial, savgol_window, savgol_order, shift=0):
     """
     For one trial, compute:
       - velocity (Savitzky-Golay smoothed position, then finite differences)
-      - F_friction = F_sensed - m * a
+      - F_friction = F_sensed_shifted - m * a
       - mu_d = F_friction / (m * g)
 
-    Returns a dict with all original fields plus velocity, friction, mu_d.
+    The `shift` parameter aligns the force_sensed data with the acceleration
+    data to account for USB readback latency. A positive shift means force_mN
+    is shifted forward by `shift` frames (i.e., force_mN[i] is paired with
+    accel[i + shift]). A negative shift means backward.
+
+    After shifting, only the overlapping region is kept — both arrays and the
+    time/position/velocity arrays are trimmed to the same valid range.
+
+    Returns a dict with all original fields (trimmed) plus velocity, friction, mu_d.
     """
     t = trial["t_stream_s"]
     pos_um = trial["position_um"]
@@ -142,16 +153,47 @@ def compute_friction_for_trial(trial, savgol_window, savgol_order):
                                   polyorder=savgol_order, deriv=1, delta=mean_dt)
     velocity_mm_s = velocity_um_s / 1000.0
 
-    # F_friction = F_sensed - m * a  (all in mN, since kg * mm/s² = mN)
-    f_friction_mN = sensed_force - M_SHAFT_KG * accel_at_stream
+    n = len(t)
+
+    # Apply frame shift to align force_sensed with acceleration.
+    # Positive shift: force_mN is shifted forward, meaning force_mN[i] corresponds
+    # to accel[i + shift]. We pair force_mN[0:n-shift] with accel[shift:n].
+    if shift > 0:
+        force_aligned = sensed_force[:n - shift]
+        accel_aligned = accel_at_stream[shift:]
+        # Trim all other arrays to match the accel (real-time) indices
+        t_trimmed = t[shift:]
+        pos_trimmed = pos_um[shift:]
+        vel_trimmed = velocity_mm_s[shift:]
+    elif shift < 0:
+        abs_shift = abs(shift)
+        force_aligned = sensed_force[abs_shift:]
+        accel_aligned = accel_at_stream[:n - abs_shift]
+        t_trimmed = t[:n - abs_shift]
+        pos_trimmed = pos_um[:n - abs_shift]
+        vel_trimmed = velocity_mm_s[:n - abs_shift]
+    else:
+        force_aligned = sensed_force
+        accel_aligned = accel_at_stream
+        t_trimmed = t
+        pos_trimmed = pos_um
+        vel_trimmed = velocity_mm_s
+
+    # F_friction = F_sensed_aligned - m * a  (all in mN, since kg * mm/s² = mN)
+    f_friction_mN = force_aligned - M_SHAFT_KG * accel_aligned
 
     # Coefficient of dynamic friction
     mu_d = f_friction_mN / WEIGHT_MN
 
     return {
-        **trial,
-        "accel_interp_mmpss": accel_at_stream,
-        "velocity_mm_s": velocity_mm_s,
+        "trial_num": trial["trial_num"],
+        "force_commanded_mN": trial["force_commanded_mN"],
+        "t_stream_s": t_trimmed,
+        "position_um": pos_trimmed,
+        "force_mN": force_aligned,
+        "accel_mmpss": accel_aligned,
+        "accel_interp_mmpss": accel_aligned,
+        "velocity_mm_s": vel_trimmed,
         "f_friction_mN": f_friction_mN,
         "mu_d": mu_d,
     }
@@ -278,6 +320,39 @@ def plot_stribeck_curve(friction_trials, force_levels):
     return fig
 
 
+def plot_stribeck_3d(friction_trials, force_levels):
+    """Plot 3D Stribeck surface: position vs velocity vs μ_d, colored by sensed force."""
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    positions_all = []
+    speeds_all = []
+    mu_d_all = []
+    force_all = []
+
+    for force_mN in force_levels:
+        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        for r in recs:
+            mask = r["t_stream_s"] >= T_IGNORE_S
+            positions_all.extend(r["position_um"][mask].tolist())
+            speeds_all.extend(np.abs(r["velocity_mm_s"][mask]).tolist())
+            mu_d_all.extend(r["mu_d"][mask].tolist())
+            force_all.extend(r["force_mN"][mask].tolist())
+
+    sc = ax.scatter(positions_all, speeds_all, mu_d_all,
+                    s=6, alpha=0.4, c=force_all, cmap="viridis")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.6, pad=0.1)
+    cbar.set_label("Sensed force (mN)")
+
+    ax.set_xlabel("Position (µm)")
+    ax.set_ylabel("Shaft speed |v| (mm/s)")
+    ax.set_zlabel("μ_d = F_friction / (m·g)")
+    ax.set_title(f"3D Stribeck (m={M_SHAFT_KG} kg, t ≥ {T_IGNORE_S} s, shift={STREAM_FORCE_SHIFT})")
+
+    plt.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Save augmented data
 # ---------------------------------------------------------------------------
@@ -302,6 +377,7 @@ def save_augmented_data(filepath_in, friction_trials):
     out["mu_d"] = mu_d_all
     out["savgol_window"] = SAVGOL_WINDOW
     out["savgol_order"] = SAVGOL_ORDER
+    out["stream_force_shift"] = STREAM_FORCE_SHIFT
 
     # Save alongside the original
     dir_name = os.path.dirname(filepath_in)
@@ -330,11 +406,13 @@ def main():
 
     print(f"\nSavitzky-Golay parameters: window={SAVGOL_WINDOW}, order={SAVGOL_ORDER}")
     print(f"Shaft mass: {M_SHAFT_KG} kg")
+    print(f"Stream force shift: {STREAM_FORCE_SHIFT} frames (USB chip: {USB_CHIP})")
 
     # Compute friction for each trial (in trial order)
     friction_trials = []
     for tnum in sorted(trials.keys()):
-        result = compute_friction_for_trial(trials[tnum], SAVGOL_WINDOW, SAVGOL_ORDER)
+        result = compute_friction_for_trial(trials[tnum], SAVGOL_WINDOW, SAVGOL_ORDER,
+                                            shift=STREAM_FORCE_SHIFT)
         friction_trials.append(result)
 
     # --- Plot 1: Velocity over time ---
@@ -364,6 +442,16 @@ def main():
     stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
     fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_path}")
+
+    # --- Plot 4: 3D Stribeck (position, velocity, μ_d) ---
+    print("Generating 3D Stribeck plot (position, velocity, μ_d)...")
+    print("  NOTE: Position and velocity values are NOT shifted by the "
+          f"stream_force_shift={STREAM_FORCE_SHIFT} parameter. "
+          "Only force_sensed is shifted to align with acceleration.")
+    fig_3d = plot_stribeck_3d(friction_trials, force_levels)
+    stribeck_3d_path = os.path.join(EXPERIMENT_DIR, "stribeck_3d.png")
+    fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
+    print(f"  Saved: {stribeck_3d_path}")
 
     # --- Save augmented data ---
     print("\nSaving augmented data with friction estimates...")
