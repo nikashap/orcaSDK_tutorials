@@ -45,6 +45,8 @@ MOTOR_MIN_UM = PARAMS["motor_min_um"]
 MOTOR_MAX_UM = PARAMS["motor_max_um"]
 EXPERIMENT_MIN_POS_UM = PARAMS["experiment_min_pos_um"]
 EXPERIMENT_MAX_POS_UM = PARAMS["experiment_max_pos_um"]
+EXPERIMENT_MID_POS_UM = (EXPERIMENT_MIN_POS_UM + EXPERIMENT_MAX_POS_UM) // 2
+STATIC_NUM_TEST_POINTS = PARAMS.get("static_num_test_points", 5)
 
 AUTO_ZERO_FORCE_N = PARAMS["auto_zero_force_n"]
 AUTO_ZERO_SPEED_MMPS = PARAMS["auto_zero_speed_mmps"]
@@ -114,9 +116,11 @@ def read_raw_acceleration(motor):
     )
     return accel_data.value
 
-
-EXPERIMENT_MID_POS_UM = (EXPERIMENT_MIN_POS_UM + EXPERIMENT_MAX_POS_UM) // 2
-
+def advance_motor_stream(motor, frames=4, sleeptime=0.002):
+    """Run through the motor command stream to clear any potentially stale frames"""
+    for _ in range(frames):
+        motor.run()
+        time.sleep(sleeptime)
 
 def move_to_position(motor, target_pos_um, duration_s=2.0, pos_tolerance_um=200):
     """
@@ -471,10 +475,7 @@ def _save_static_friction_result(result, start_pos_um, label, filepath):
 
 def collect_static_friction_data(motor):
     """
-    Estimate static friction at three shaft positions:
-      1) experiment_min_pos_um  — positive force ramp (current logic)
-      2) experiment_mid_pos_um  — positive force ramp
-      3) experiment_max_pos_um  — negative force ramp
+    Estimate static friction at 7 shaft positions in [experiment_min_pos_um, experiment_max_pos_um]
     """
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -493,21 +494,26 @@ def collect_static_friction_data(motor):
     time.sleep(0.1)
 
     # Define the three test points: (position, force_sign, label)
-    test_points = [
-        (EXPERIMENT_MIN_POS_UM, +1, "min_pos"),
-        (EXPERIMENT_MID_POS_UM, +1, "mid_pos"),
-        (EXPERIMENT_MAX_POS_UM, -1, "max_pos"),
-    ]
+    test_points = np.linspace(EXPERIMENT_MIN_POS_UM,
+                              EXPERIMENT_MAX_POS_UM,
+                              STATIC_NUM_TEST_POINTS)
+    
+    test_points_params = []
+    for i, tp in enumerate(test_points):
+        force_sign = -1 if tp > EXPERIMENT_MID_POS_UM else +1
+        test_points_params.append((int(tp), force_sign, str(i)))
 
     results = {}
 
-    for target_pos_um, force_sign, label in test_points:
-        print(f"\n--- Static friction at {label} ({target_pos_um} µm, "
+    for target_pos_um, force_sign, label in test_points_params:
+        print(f"\n--- Static friction at point {label} ; ({target_pos_um} µm, "
               f"force_sign={force_sign:+d}) ---")
 
         move_to_position(motor, target_pos_um)
         motor.enable_stream()
-        time.sleep(2.0)
+        print("Clear motor stream for a few frames...")
+        time.sleep(3.0)
+        advance_motor_stream(motor)
 
         print("  Ramping force to find breakaway point...")
         result = run_static_friction_procedure(motor, force_sign=force_sign)
@@ -549,9 +555,9 @@ def main():
     print(f"  Output directory: {DATA_DIR}/")
 
     print(f"\nProcedures:")
-    print(f"  1) Mass estimation (constant force trials)")
+    print(f"  1) Dynamic friction estimation (constant force trials)")
     print(f"  2) Static friction estimation (force ramp)")
-    print(f"  3) Both (friction first, then mass estimation)")
+    print(f"  3) Both (static first, then dynamic)")
     procedure = input("Select procedure [1/2/3]: ").strip() or "1"
 
     input("\nPress Enter to begin data collection...")
