@@ -408,7 +408,7 @@ def collect_static_friction_data(motor):
 
     motor.set_mode(MotorMode.SleepMode)
     print(f"  Reached start position ({current_pos_um} µm).")
-    time.sleep(0.2)
+    time.sleep(2.0)
 
     print("  Ramping force to find breakaway point...")
     result = run_static_friction_procedure(motor)

@@ -130,7 +130,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         print(f"  Active baud (reg 482-483): {result.value}")
         
         # Latency test
-        num_samples = 10000
+        num_samples = 5000
         print(f"\nMeasuring latency ({num_samples} samples)...")
         latencies = []
         
@@ -238,10 +238,10 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
 
 
 if __name__ == "__main__":
-    port="/dev/cu.usbserial-ABA76SF6"
-    # port="/dev/cu.usbserial-1460"
+    # port="/dev/cu.usbserial-ABA76SF6"
+    port="/dev/cu.usbserial-1460"
     target_baud = 1000000
-    interframe_delay = 0
+    interframe_delay = 100
 
     # startup_from_default("Startup Motor", port, target_baud, interframe_delay)
     test_serial_ftdi(port, target_baud, interframe_delay, test_stream=True)

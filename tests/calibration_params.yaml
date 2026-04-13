@@ -22,20 +22,21 @@ experiment_max_pos_um: 503000       # end of usable range (micrometers)
 # Communication
 # ---------------------------------------------------------------------------
 baud_rate: 1000000
-interframe_delay_us: 0
+interframe_delay_us: 100
 default_serial_port: "/dev/cu.usbserial-ABA76SF6"
 
 # ---------------------------------------------------------------------------
 # Auto-zero
 # ---------------------------------------------------------------------------
 auto_zero_force_n: 50               # max force during auto-zero (Newtons)
-auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
+auto_zero_speed_mmps: 200            # max speed during auto-zero (mm/s)
 
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000]
-iterations_per_force: 5
+force_levels_mN: [7500, 8500, 10000, 12000]
+# force_levels_mN: [14000, 15000]
+iterations_per_force: 3
 
 # ---------------------------------------------------------------------------
 # Static friction estimation (force ramp procedure)

@@ -164,7 +164,7 @@ def compute_friction_for_trial(trial, savgol_window, savgol_order):
 def plot_velocity_over_time(friction_trials, force_levels):
     """Plot velocity vs time for each force level (one subplot per level)."""
     fig, axes = plt.subplots(len(force_levels), 1,
-                             figsize=(12, 3 * len(force_levels)), sharex=False)
+                             figsize=(12, 4 * len(force_levels)), sharex=False)
     if len(force_levels) == 1:
         axes = [axes]
 
@@ -184,29 +184,85 @@ def plot_velocity_over_time(friction_trials, force_levels):
 
     axes[-1].set_xlabel("Time (s)")
     plt.suptitle(f"Velocity estimates (Savitzky-Golay window={SAVGOL_WINDOW}, "
-                 f"order={SAVGOL_ORDER}, m={M_SHAFT_KG} kg)", fontsize=12, y=1.01)
+                 f"order={SAVGOL_ORDER}, m={M_SHAFT_KG} kg)", fontsize=12, y=0.98)
     plt.tight_layout()
     return fig
 
+def plot_Fsensed_over_time(friction_trials, force_levels):
+    """Plot sensed outputted force over time for ecah force level (one subplot per level)."""
+    fig, axes = plt.subplots(len(force_levels), 1,
+                             figsize=(12, 4 * len(force_levels)), sharex=False)
+    if len(force_levels) == 1:
+        axes = [axes]
+
+    colors = plt.cm.tab10(np.linspace(0,1,10))
+
+    for i, force_mN in enumerate(force_levels): 
+        ax = axes[i]
+        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        for j, r in enumerate(recs):
+            ax.plot(r["t_stream_s"], r["force_mN"],
+                    linewidth=0.8, color=colors[j % len(colors)],
+                    label=f"Trial {r['trial_num']}")
+        ax.set_ylabel("Sensed force (mN)")
+        ax.set_title(f"F_commanded = {force_mN} mN")
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Time (s)")
+    plt.suptitle(f"Sensed force output; filter strength = ___ m={M_SHAFT_KG} kg)", fontsize=12, y=0.98)
+    plt.tight_layout()
+    return fig
+
+def plot_accel_over_time(friction_trials, force_levels):
+    """Plot measured acceleration over time for each force level (one subplot per level)."""
+    fig, axes = plt.subplots(len(force_levels), 1,
+                             figsize=(12, 4 * len(force_levels)), sharex=False)
+    if len(force_levels) == 1:
+        axes = [axes]
+
+    colors = plt.cm.tab10(np.linspace(0,1,10))
+
+    for i, force_mN in enumerate(force_levels): 
+        ax = axes[i]
+        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        for j, r in enumerate(recs):
+            ax.plot(r["t_stream_s"], r["accel_mmpss"],
+                    linewidth=0.8, color=colors[j % len(colors)],
+                    label=f"Trial {r['trial_num']}")
+        ax.set_ylabel("Acceleration (mm/s^2)")
+        ax.set_title(f"F_commanded = {force_mN} mN")
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Time (s)")
+    plt.suptitle(f"Measured acceleration; filter strength = ___ m={M_SHAFT_KG} kg)", fontsize=12, y=0.98)
+    plt.tight_layout()
+    return fig
 
 def plot_stribeck_curve(friction_trials, force_levels):
     """Plot Stribeck curve: μ_d vs shaft speed |v|."""
     fig, ax = plt.subplots(figsize=(10, 6))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(force_levels)))
 
-    for i, force_mN in enumerate(force_levels):
+    speeds_all = []
+    mu_d_all = []
+    force_all = []
+
+    for force_mN in force_levels:
         recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
-        speeds_all = []
-        mu_d_all = []
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
             speed = np.abs(r["velocity_mm_s"][mask])
             mu_d = r["mu_d"][mask]
+            force = r["force_mN"][mask]
             speeds_all.extend(speed.tolist())
             mu_d_all.extend(mu_d.tolist())
+            force_all.extend(force.tolist())
 
-        ax.scatter(speeds_all, mu_d_all, s=8, alpha=0.4, color=colors[i],
-                   label=f"F_cmd = {force_mN} mN")
+    sc = ax.scatter(speeds_all, mu_d_all, s=8, alpha=0.4, c=force_all,
+                    cmap="viridis")
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Sensed force (mN)")
 
     # Static friction reference lines
     ax.axhline(F_STATIC_LOW_MN / WEIGHT_MN, color="r", linestyle="--", alpha=0.5,
@@ -285,10 +341,24 @@ def main():
     print("\nGenerating velocity over time plot...")
     fig_vel = plot_velocity_over_time(friction_trials, force_levels)
     vel_path = os.path.join(EXPERIMENT_DIR, "velocity_over_time.png")
-    fig_vel.savefig(vel_path, dpi=150, bbox_inches="tight")
+    fig_vel.savefig(vel_path, dpi=150)
     print(f"  Saved: {vel_path}")
 
-    # --- Plot 2: Stribeck curve ---
+    # --- Plot 2: Sensed force over time ---
+    print("\nGenerating sensed force over time plot...")
+    fig_fsense = plot_Fsensed_over_time(friction_trials, force_levels)
+    fsense_path = os.path.join(EXPERIMENT_DIR, "Fsensed_over_time.png")
+    fig_fsense.savefig(fsense_path, dpi=150)
+    print(f"  Saved: {fsense_path}")
+
+    # --- Plot 3: Measured acceleration over time ---
+    print("\nGenerating acceleration over time plot...")
+    fig_accel = plot_accel_over_time(friction_trials, force_levels)
+    accel_path = os.path.join(EXPERIMENT_DIR, "accel_over_time.png")
+    fig_accel.savefig(accel_path, dpi=150)
+    print(f"  Saved: {accel_path}")
+
+    # --- Plot 3: Stribeck curve ---
     print("Generating Stribeck curve...")
     fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
     stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
