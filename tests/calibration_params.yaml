@@ -11,30 +11,31 @@ shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inc
 # ---------------------------------------------------------------------------
 # Motor position range (from AutoZero / IrisGui)
 # ---------------------------------------------------------------------------
-motor_min_um: 300                   # minimum shaft position (micrometers)
-motor_max_um: 663870                # maximum shaft position (micrometers)
+motor_min_um: 1300                   # minimum shaft position (micrometers)
+motor_max_um: 670000                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
 experiment_min_pos_um: 40000          # start of usable range (micrometers)
-experiment_max_pos_um: 503000       # end of usable range (micrometers)
+experiment_max_pos_um: 630000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
 # Communication
 # ---------------------------------------------------------------------------
 baud_rate: 1000000
 interframe_delay_us: 100
-default_serial_port: "/dev/cu.usbserial-ABA76SF6"
+# default_serial_port: "/dev/cu.usbserial-ABA76SF6"
+default_serial_port: "/dev/cu.usbserial-1460"
 
 # ---------------------------------------------------------------------------
 # Auto-zero
 # ---------------------------------------------------------------------------
 auto_zero_force_n: 50               # max force during auto-zero (Newtons)
-auto_zero_speed_mmps: 200            # max speed during auto-zero (mm/s)
+auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [7500, 8500, 10000, 12000]
+force_levels_mN: [7500, -7500, 10000, -10000]
 # force_levels_mN: [14000, 15000]
 iterations_per_force: 3
 
@@ -79,4 +80,4 @@ stream_force_shift: 3               # frame shift to align force_sensed with acc
 # USB-to-serial chip in use (e.g. "FT232R", "FT232H"). Affects USB latency
 # and therefore the optimal shift value. FT232R ~1.3 ms/transaction,
 # FT232H or PCIe card can be significantly lower.
-usb_chip: "FT232R"
+usb_chip: "FT232H"
