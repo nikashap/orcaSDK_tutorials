@@ -121,7 +121,7 @@ def compute_friction_for_trial(trial, savgol_window, savgol_order, shift=0):
     For one trial, compute:
       - velocity (Savitzky-Golay smoothed position, then finite differences)
       - F_friction = F_sensed_shifted - m * a
-      - mu_d = abs(F_friction) / (m * g)
+      - mu_d = F_friction / (m * g)   (signed, not absolute value)
 
     The `shift` parameter aligns the force_sensed data with the acceleration
     data to account for USB readback latency. A positive shift means force_mN
@@ -395,22 +395,52 @@ def plot_stribeck_3d(friction_trials, force_levels):
 
 def save_augmented_data(filepath_in, friction_trials):
     """
-    Save a new .npz that contains all original data plus appended arrays:
-      - velocity_mm_s, f_friction_mN, mu_d (concatenated across trials)
-      - savgol_window, savgol_order (so you know what produced the estimates)
+    Save a new .npz with all per-sample arrays aligned after shift trimming.
+
+    The shift in compute_friction_for_trial trims each trial by `shift` samples.
+    All per-sample arrays here come from the trimmed friction_trials dicts, so
+    position_um, force_mN, accel_mmpss, velocity_mm_s, f_friction_mN, and mu_d
+    are guaranteed to be the same length and sample-aligned.
+
+    The raw (untrimmed) data is preserved in calibration_dynamic_friction.npz.
     """
     original = np.load(filepath_in, allow_pickle=True)
 
-    # Concatenate the new per-sample arrays in trial order
+    # Concatenate trimmed+aligned per-sample arrays from friction_trials
+    t_stream_all = np.concatenate([r["t_stream_s"] for r in friction_trials])
+    position_all = np.concatenate([r["position_um"] for r in friction_trials])
+    force_sensed_all = np.concatenate([r["force_mN"] for r in friction_trials])
+    accel_all = np.concatenate([r["accel_mmpss"] for r in friction_trials])
     velocity_all = np.concatenate([r["velocity_mm_s"] for r in friction_trials])
     f_friction_all = np.concatenate([r["f_friction_mN"] for r in friction_trials])
     mu_d_all = np.concatenate([r["mu_d"] for r in friction_trials])
 
-    # Build output dict with all original arrays + new ones
-    out = {key: original[key] for key in original.files}
+    # Recompute trial boundaries for trimmed data
+    trial_n_samples = np.array([len(r["mu_d"]) for r in friction_trials],
+                               dtype=np.int32)
+    trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples)])
+
+    # Build output: metadata from original + trimmed per-sample arrays
+    out = {}
+    for key in ["mass_shaft_kg", "motor_min_um", "motor_max_um",
+                "experiment_min_pos_um", "experiment_max_pos_um",
+                "force_levels_mN", "iterations_per_force", "n_trials",
+                "trial_force_commanded_mN"]:
+        out[key] = original[key]
+
+    out["trial_n_samples"] = trial_n_samples
+    out["trial_boundaries"] = trial_boundaries
+
+    # Trimmed and aligned per-sample arrays
+    out["t_stream_s"] = t_stream_all
+    out["position_um"] = position_all
+    out["force_mN"] = force_sensed_all
+    out["accel_mmpss"] = accel_all
     out["velocity_mm_s"] = velocity_all
     out["f_friction_mN"] = f_friction_all
     out["mu_d"] = mu_d_all
+
+    # Analysis parameters
     out["savgol_window"] = SAVGOL_WINDOW
     out["savgol_order"] = SAVGOL_ORDER
     out["stream_force_shift"] = STREAM_FORCE_SHIFT
