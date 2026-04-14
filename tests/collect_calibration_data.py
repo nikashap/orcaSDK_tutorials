@@ -124,7 +124,7 @@ def advance_motor_stream(motor, frames=4, sleeptime=0.002):
         motor.run()
         time.sleep(sleeptime)
 
-def move_to_position(motor, target_pos_um, kick_force_mag_mN=10000, duration_s=0.5, pos_tolerance_um=200):
+def move_to_position(motor, target_pos_um, kick_force_mag_mN=10000, duration_s=0.2, pos_tolerance_um=200):
     """
     Move the motor to ``target_pos_um`` by streaming using ``kick_force_mag_mN`` to
     get the motor close to the target_pos_um, then command the shaft to move
@@ -134,9 +134,6 @@ def move_to_position(motor, target_pos_um, kick_force_mag_mN=10000, duration_s=0
     The motor must already have streaming enabled before calling this function.
     On return the motor is placed back into SleepMode.
     """
-    # Read current position — drain stale frames first so start_pos_um is
-    # accurate.  The first call sets PositionMode with the current position
-    # (hold in place), then subsequent calls flush the stale stream data.
 
     motor.set_mode(MotorMode.ForceMode)
     passed_target = False
@@ -161,8 +158,7 @@ def move_to_position(motor, target_pos_um, kick_force_mag_mN=10000, duration_s=0
     stream_data = motor.get_stream_data()
     start_pos_um = stream_data.position
 
-    # Command motor to hold at current position while we begin the ramp,
-    # preventing any jump from a stale setpoint.
+    # Command motor to move at consistent trajectory to target_pos
     motor.set_streamed_position_um(start_pos_um)
     motor.run()
 
@@ -285,7 +281,7 @@ def collect_data(motor,
     try:
         for force_mN in forces_mN_list:
             if force_mN > FORCE_SAFETY_LIMIT_MN:
-                raise ValueError(f"Force command {force_mN} mN exceeds safety limit of {FORCE_SAFTEY_LIMIT_MN} mN")
+                raise ValueError(f"Force command {force_mN} mN exceeds safety limit of {FORCE_SAFETY_LIMIT_MN} mN")
             
             for iteration in range(iters_per_force):
                 trial_num += 1
@@ -408,6 +404,8 @@ def run_static_friction_procedure(motor, force_sign=1):
     pos_changes = []
     all_step_accels = []
     all_step_positions = []
+    all_step_forces_sensed = []
+    all_step_times = []
     breakaway_force = None
 
     force_magnitude = FRICTION_FORCE_START_MN
@@ -423,15 +421,22 @@ def run_static_friction_procedure(motor, force_sign=1):
 
         accels = []
         positions = []
+        forces_sensed = []
+        t_samples = []
         for _ in range(FRICTION_SAMPLES_PER_STEP):
             motor.run()
+            t1 = time.perf_counter()
             stream_data = motor.get_stream_data()
             accel = read_raw_acceleration(motor)
             accels.append(accel)
             positions.append(stream_data.position)
+            forces_sensed.append(stream_data.force)
+            t_samples.append(t1)
 
         accels = np.array(accels, dtype=np.float64)
         positions = np.array(positions, dtype=np.float64)
+        forces_sensed = np.array(forces_sensed, dtype=np.float64)
+        t_samples = np.array(t_samples, dtype=np.float64)
 
         mean_abs_accel = np.mean(np.abs(accels))
         std_abs_accel = np.std(np.abs(accels))
@@ -443,11 +448,15 @@ def run_static_friction_procedure(motor, force_sign=1):
         pos_changes.append(pos_change)
         all_step_accels.append(accels)
         all_step_positions.append(positions)
+        all_step_forces_sensed.append(forces_sensed)
+        all_step_times.append(t_samples)
 
         moving_by_accel = mean_abs_accel > FRICTION_ACCEL_THRESHOLD_MMPSS
         moving_by_pos = pos_change > FRICTION_POS_CHANGE_THRESHOLD_UM
 
+        mean_force_sensed = np.mean(forces_sensed)
         print(f"  Force={force_mN:6d} mN | "
+              f"F_sensed={mean_force_sensed:8.1f} mN | "
               f"mean|a|={mean_abs_accel:8.1f} mm/s² | "
               f"std|a|={std_abs_accel:8.1f} mm/s² | "
               f"Δpos={pos_change:8.1f} µm | "
@@ -471,19 +480,31 @@ def run_static_friction_procedure(motor, force_sign=1):
         "breakaway_force_mN": breakaway_force,
         "all_step_accels": all_step_accels,
         "all_step_positions": all_step_positions,
+        "all_step_forces_sensed": all_step_forces_sensed,
+        "all_step_times": all_step_times,
     }
 
 
 def _save_static_friction_result(result, start_pos_um, label, filepath):
-    """Pack one static friction result into a .npz file."""
+    """Pack one static friction result into a .npz file.
+
+    Saves per-step raw samples as 2D arrays (n_steps x max_step_len), padded
+    with NaN where steps have fewer samples. This includes accelerations,
+    positions, sensed forces, and timestamps — consistent with how dynamic
+    friction data is saved, so the same shift-based analysis can be applied.
+    """
     max_step_len = max(len(a) for a in result["all_step_accels"])
     n_steps = len(result["all_step_accels"])
     step_accels_2d = np.full((n_steps, max_step_len), np.nan, dtype=np.float64)
     step_positions_2d = np.full((n_steps, max_step_len), np.nan, dtype=np.float64)
+    step_forces_2d = np.full((n_steps, max_step_len), np.nan, dtype=np.float64)
+    step_times_2d = np.full((n_steps, max_step_len), np.nan, dtype=np.float64)
     for i in range(n_steps):
         n = len(result["all_step_accels"][i])
         step_accels_2d[i, :n] = result["all_step_accels"][i]
         step_positions_2d[i, :n] = result["all_step_positions"][i]
+        step_forces_2d[i, :n] = result["all_step_forces_sensed"][i]
+        step_times_2d[i, :n] = result["all_step_times"][i]
 
     np.savez(
         filepath,
@@ -495,6 +516,8 @@ def _save_static_friction_result(result, start_pos_um, label, filepath):
         breakaway_force_mN=result["breakaway_force_mN"] or 0,
         step_accels=step_accels_2d,
         step_positions=step_positions_2d,
+        step_forces_sensed=step_forces_2d,
+        step_times=step_times_2d,
         samples_per_step=FRICTION_SAMPLES_PER_STEP,
     )
     print(f"\n  Saved friction data ({label}): {filepath}")
