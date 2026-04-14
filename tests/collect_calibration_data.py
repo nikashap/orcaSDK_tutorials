@@ -38,6 +38,8 @@ import yaml
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
 
+FORCE_SAFETY_LIMIT_MN = 30000
+
 with open(_PARAMS_PATH, "r") as f:
     PARAMS = yaml.safe_load(f)
 
@@ -122,11 +124,12 @@ def advance_motor_stream(motor, frames=4, sleeptime=0.002):
         motor.run()
         time.sleep(sleeptime)
 
-def move_to_position(motor, target_pos_um, duration_s=1.0, pos_tolerance_um=200):
+def move_to_position(motor, target_pos_um, kick_force_mag_mN=10000, duration_s=0.5, pos_tolerance_um=200):
     """
-    Move the motor to ``target_pos_um`` by streaming a smooth linear ramp of
-    position setpoints over ``duration_s`` seconds, then hold until the shaft
-    is within ``pos_tolerance_um`` of the target.
+    Move the motor to ``target_pos_um`` by streaming using ``kick_force_mag_mN`` to
+    get the motor close to the target_pos_um, then command the shaft to move
+    to target_pos_um and hold until the shaft is within ``pos_tolerance_um``
+    of the target.
 
     The motor must already have streaming enabled before calling this function.
     On return the motor is placed back into SleepMode.
@@ -135,8 +138,24 @@ def move_to_position(motor, target_pos_um, duration_s=1.0, pos_tolerance_um=200)
     # accurate.  The first call sets PositionMode with the current position
     # (hold in place), then subsequent calls flush the stale stream data.
 
-    # TODO: actually just use Force mode to command a constant force until bypass
-    # desired set point, then use PositionMode for minor corrections
+    motor.set_mode(MotorMode.ForceMode)
+    passed_target = False
+    # Infer direction motor needs to travel
+    motor.run()
+    stream_data = motor.get_stream_data()
+    force_direction = +1
+    if stream_data.position > target_pos_um:
+        force_direction = -1
+    
+    while not passed_target:
+        motor.run()
+        stream_data = motor.get_stream_data()
+        if stream_data.position <= target_pos_um and force_direction < 0:
+            passed_target = True
+        elif stream_data.position >= target_pos_um and force_direction > 0:
+            passed_target = True
+        motor.set_streamed_force_mN(kick_force_mag_mN*force_direction)
+    
     motor.set_mode(MotorMode.PositionMode)
     advance_motor_stream(motor)
     stream_data = motor.get_stream_data()
@@ -265,6 +284,9 @@ def collect_data(motor,
 
     try:
         for force_mN in forces_mN_list:
+            if force_mN > FORCE_SAFETY_LIMIT_MN:
+                raise ValueError(f"Force command {force_mN} mN exceeds safety limit of {FORCE_SAFTEY_LIMIT_MN} mN")
+            
             for iteration in range(iters_per_force):
                 trial_num += 1
                 print(f"\n--- Trial {trial_num}/{total_trials}: "
@@ -309,6 +331,8 @@ def collect_data(motor,
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
+    except ValueError as e:
+        print(f"\nExcessive force command: {e}")
     except Exception as e:
         print(f"\nError during collection: {e}")
         raise

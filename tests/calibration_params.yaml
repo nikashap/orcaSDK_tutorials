@@ -35,14 +35,51 @@ auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [-7700, -8500, -9000, -9500, -10000, -10500]
+force_levels_mN: [-6500,
+                 -7000,
+                 -7500,
+                 -8000,
+                 -8500,
+                 -9000,
+                 -9500,
+                 -10000,
+                 -10500,
+                 -11000,
+                 -11500,
+                 -12000,
+                 -12500,
+                 -13000,
+                 -13500,
+                 -14000,
+                 -14500,
+                 -15000,
+                 6000,
+                 6500,
+                 7000,
+                 7500,
+                 8000,
+                 8500,
+                 9000,
+                 9500,
+                 10000,
+                 10500,
+                 11000,
+                 11500,
+                 12000,
+                 12500,
+                 13000,
+                 13500,
+                 14000,
+                 14500,
+                 15000
+                 ]
 # force_levels_mN: [14000, 15000]
-iterations_per_force: 3
+iterations_per_force: 5
 
 # ---------------------------------------------------------------------------
 # Static friction estimation (force ramp procedure)
 # ---------------------------------------------------------------------------
-static_num_test_points: 7
+static_num_test_points: 3
 friction_force_start_mN: 1000       # starting force for ramp
 friction_force_step_mN: 100         # force increment per step
 friction_force_max_mN: 15000        # safety cap
