@@ -103,10 +103,24 @@ friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 data_dir: "../data"
 
 # ---------------------------------------------------------------------------
-# Analysis: Savitzky-Golay velocity estimation
+# Analysis: velocity estimation
 # ---------------------------------------------------------------------------
+# Which velocity estimator to use: "SG" (Savitzky-Golay) or "RW" (rolling window)
+#   SG  — fits a polynomial over a symmetric window, then takes the analytical
+#          derivative. Non-causal (uses future samples). Good for clean offline
+#          analysis but does NOT match the real-time estimator.
+#   RW  — rolling mean of finite differences over the last K samples. Causal
+#          (no future data). Matches the real-time velocity estimator used in
+#          the MWorks control loop, so the friction model trains on the same
+#          velocity distribution it will see at inference.
+velocity_estimator: "RW"
+
+# Savitzky-Golay parameters (used when velocity_estimator == "SG")
 savgol_window: 15                   # window length for Savitzky-Golay filter
 savgol_order: 2                     # polynomial order for Savitzky-Golay filter
+
+# Rolling window parameters (used when velocity_estimator == "RW")
+rw_window: 5                        # number of finite-difference samples to average
 
 # ---------------------------------------------------------------------------
 # Analysis: friction estimation

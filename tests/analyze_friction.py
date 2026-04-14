@@ -58,8 +58,10 @@ M_SHAFT_KG = PARAMS["mass_shaft_kg"]
 G_MMPSS = 9810.0  # gravitational acceleration in mm/s²
 WEIGHT_MN = M_SHAFT_KG * G_MMPSS  # normal force in mN
 
+VELOCITY_ESTIMATOR = PARAMS.get("velocity_estimator", "SG").upper()
 SAVGOL_WINDOW = PARAMS["savgol_window"]
 SAVGOL_ORDER = PARAMS["savgol_order"]
+RW_WINDOW = PARAMS.get("rw_window", 5)
 T_IGNORE_S = PARAMS["t_ignore_s"]
 F_STATIC_LOW_MN = PARAMS["static_friction_low_mN"]
 F_STATIC_HIGH_MN = PARAMS["static_friction_high_mN"]
@@ -116,20 +118,71 @@ def load_master_data(filepath):
 # Friction computation
 # ---------------------------------------------------------------------------
 
-def compute_friction_for_trial(trial, savgol_window, savgol_order, shift=0):
+def _velocity_savgol(pos_um, t, savgol_window, savgol_order):
+    """Velocity via Savitzky-Golay analytical derivative (deriv=1).
+
+    Non-causal — uses a symmetric window centered on each sample.
+    Using delta=mean(dt) because savgol_filter assumes uniform spacing.
+    """
+    mean_dt = np.mean(np.diff(t))
+    velocity_um_s = savgol_filter(pos_um, window_length=savgol_window,
+                                  polyorder=savgol_order, deriv=1, delta=mean_dt)
+    return velocity_um_s / 1000.0
+
+
+def _velocity_rolling_window(pos_um, t, rw_window):
+    """Velocity via rolling mean of finite differences.
+
+    Causal — v[i] is the mean of the last ``rw_window`` finite-difference
+    velocity samples: (pos[i]-pos[i-1])/dt, ..., (pos[i-k+1]-pos[i-k])/dt.
+    The first ``rw_window`` samples use a growing window (all differences
+    available so far) so no samples are NaN.
+    """
+    dt = np.diff(t)                       # (n-1,)
+    v_inst = np.diff(pos_um) / dt / 1000.0  # instantaneous velocity in mm/s, (n-1,)
+
+    n = len(pos_um)
+    velocity_mm_s = np.zeros(n)
+    # v_inst[i] = velocity between sample i and i+1.
+    # We assign v_inst[i] as the velocity "at" sample i+1 (backward difference).
+    # Sample 0 gets the first available difference.
+    cumsum = np.cumsum(np.concatenate([[0.0], v_inst]))
+    for i in range(n):
+        # Index into v_inst: sample i corresponds to v_inst[i-1] (backward diff)
+        # We want to average v_inst[max(0, i-rw_window) : i]
+        if i == 0:
+            velocity_mm_s[0] = v_inst[0]  # only one difference available
+        else:
+            lo = max(0, i - rw_window)
+            velocity_mm_s[i] = (cumsum[i] - cumsum[lo]) / (i - lo)
+
+    return velocity_mm_s
+
+
+def compute_friction_for_trial(trial, velocity_estimator="SG",
+                               savgol_window=15, savgol_order=2,
+                               rw_window=5, shift=0):
     """
     For one trial, compute:
-      - velocity (Savitzky-Golay smoothed position, then finite differences)
+      - velocity (via the chosen estimator: SG or RW)
       - F_friction = F_sensed_shifted - m * a
       - mu_d = F_friction / (m * g)   (signed, not absolute value)
 
-    The `shift` parameter aligns the force_sensed data with the acceleration
-    data to account for USB readback latency. A positive shift means force_mN
-    is shifted forward by `shift` frames (i.e., force_mN[i] is paired with
-    accel[i + shift]). A negative shift means backward.
+    Parameters
+    ----------
+    velocity_estimator : str
+        "SG" for Savitzky-Golay (non-causal), "RW" for rolling window (causal).
+    savgol_window, savgol_order : int
+        Parameters for the SG estimator (ignored when velocity_estimator=="RW").
+    rw_window : int
+        Number of finite-difference samples to average for the RW estimator
+        (ignored when velocity_estimator=="SG").
+    shift : int
+        Frame shift to align force_sensed with acceleration. A positive shift
+        means force_mN[i] is paired with accel[i + shift].
 
-    After shifting, only the overlapping region is kept — both arrays and the
-    time/position/velocity arrays are trimmed to the same valid range.
+    After shifting, only the overlapping region is kept — all arrays are
+    trimmed to the same valid range.
 
     Returns a dict with all original fields (trimmed) plus velocity, friction, mu_d.
     """
@@ -144,14 +197,14 @@ def compute_friction_for_trial(trial, savgol_window, savgol_order, shift=0):
                                bounds_error=False, fill_value="extrapolate")
     accel_at_stream = accel_interp_fn(t)
 
-    # Velocity via Savitzky-Golay analytical derivative (deriv=1).
-    # Using delta=mean(dt) because savgol_filter assumes uniform spacing.
-    # This computes velocity from the polynomial fit directly, avoiding the
-    # systematic underestimate caused by smooth-then-diff on non-uniform data.
-    mean_dt = np.mean(np.diff(t))
-    velocity_um_s = savgol_filter(pos_um, window_length=savgol_window,
-                                  polyorder=savgol_order, deriv=1, delta=mean_dt)
-    velocity_mm_s = velocity_um_s / 1000.0
+    # Velocity estimation
+    if velocity_estimator == "SG":
+        velocity_mm_s = _velocity_savgol(pos_um, t, savgol_window, savgol_order)
+    elif velocity_estimator == "RW":
+        velocity_mm_s = _velocity_rolling_window(pos_um, t, rw_window)
+    else:
+        raise ValueError(f"Unknown velocity_estimator: {velocity_estimator!r}. "
+                         f"Expected 'SG' or 'RW'.")
 
     n = len(t)
 
@@ -225,8 +278,12 @@ def plot_velocity_over_time(friction_trials, force_levels):
         ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel("Time (s)")
-    plt.suptitle(f"Velocity estimates (Savitzky-Golay window={SAVGOL_WINDOW}, "
-                 f"order={SAVGOL_ORDER}, m={M_SHAFT_KG} kg)", fontsize=12, y=0.98)
+    if VELOCITY_ESTIMATOR == "SG":
+        vel_label = f"Savitzky-Golay window={SAVGOL_WINDOW}, order={SAVGOL_ORDER}"
+    else:
+        vel_label = f"Rolling window K={RW_WINDOW}"
+    plt.suptitle(f"Velocity estimates ({vel_label}, m={M_SHAFT_KG} kg)",
+                 fontsize=12, y=0.98)
     plt.tight_layout()
     return fig
 
@@ -441,8 +498,10 @@ def save_augmented_data(filepath_in, friction_trials):
     out["mu_d"] = mu_d_all
 
     # Analysis parameters
+    out["velocity_estimator"] = VELOCITY_ESTIMATOR
     out["savgol_window"] = SAVGOL_WINDOW
     out["savgol_order"] = SAVGOL_ORDER
+    out["rw_window"] = RW_WINDOW
     out["stream_force_shift"] = STREAM_FORCE_SHIFT
 
     # Save alongside the original
@@ -470,15 +529,25 @@ def main():
     force_levels = metadata["force_levels_mN"]
     print(f"Loaded {len(trials)} trials across force levels {force_levels}")
 
-    print(f"\nSavitzky-Golay parameters: window={SAVGOL_WINDOW}, order={SAVGOL_ORDER}")
+    print(f"\nVelocity estimator: {VELOCITY_ESTIMATOR}")
+    if VELOCITY_ESTIMATOR == "SG":
+        print(f"  Savitzky-Golay: window={SAVGOL_WINDOW}, order={SAVGOL_ORDER}")
+    else:
+        print(f"  Rolling window: window={RW_WINDOW}")
     print(f"Shaft mass: {M_SHAFT_KG} kg")
     print(f"Stream force shift: {STREAM_FORCE_SHIFT} frames (USB chip: {USB_CHIP})")
 
     # Compute friction for each trial (in trial order)
     friction_trials = []
     for tnum in sorted(trials.keys()):
-        result = compute_friction_for_trial(trials[tnum], SAVGOL_WINDOW, SAVGOL_ORDER,
-                                            shift=STREAM_FORCE_SHIFT)
+        result = compute_friction_for_trial(
+            trials[tnum],
+            velocity_estimator=VELOCITY_ESTIMATOR,
+            savgol_window=SAVGOL_WINDOW,
+            savgol_order=SAVGOL_ORDER,
+            rw_window=RW_WINDOW,
+            shift=STREAM_FORCE_SHIFT,
+        )
         friction_trials.append(result)
 
     # --- Plot 1: Velocity over time ---
