@@ -283,7 +283,7 @@ def plot_accel_over_time(friction_trials, force_levels):
     return fig
 
 def plot_stribeck_curve(friction_trials, force_levels):
-    """Plot Stribeck curve: μ_d vs shaft speed |v|."""
+    """Plot Stribeck curve: μ_d vs shaft speed v."""
     fig, ax = plt.subplots(figsize=(10, 6))
 
     speeds_all = []
@@ -294,7 +294,7 @@ def plot_stribeck_curve(friction_trials, force_levels):
         recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
-            speed = np.abs(r["velocity_mm_s"][mask])
+            speed = r["velocity_mm_s"][mask]
             mu_d = r["mu_d"][mask]
             force = r["force_mN"][mask]
             speeds_all.extend(speed.tolist())
@@ -311,7 +311,7 @@ def plot_stribeck_curve(friction_trials, force_levels):
                label=f"μ_s range: {F_STATIC_LOW_MN/WEIGHT_MN:.4f}–{F_STATIC_HIGH_MN/WEIGHT_MN:.4f}")
     ax.axhline(F_STATIC_HIGH_MN / WEIGHT_MN, color="r", linestyle="--", alpha=0.5)
 
-    ax.set_xlabel("Shaft speed |v| (mm/s)")
+    ax.set_xlabel("Velocity (mm/s)")
     ax.set_ylabel("μ_d = F_friction / (m·g)")
     ax.set_title(f"Stribeck curve (m={M_SHAFT_KG} kg, t ≥ {T_IGNORE_S} s)")
     ax.legend(fontsize=8)
@@ -319,6 +319,42 @@ def plot_stribeck_curve(friction_trials, force_levels):
     plt.tight_layout()
     return fig
 
+def plot_position_vs_mud_curve(friction_trials, force_levels):
+    """Plot position vs mu_d"""
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    speeds_all = []
+    mu_d_all = []
+    force_all = []
+
+    for force_mN in force_levels:
+        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        for r in recs:
+            mask = r["t_stream_s"] >= T_IGNORE_S
+            speed = r["position_um"][mask]
+            mu_d = r["mu_d"][mask]
+            force = r["force_mN"][mask]
+            speeds_all.extend(speed.tolist())
+            mu_d_all.extend(mu_d.tolist())
+            force_all.extend(force.tolist())
+
+    sc = ax.scatter(speeds_all, mu_d_all, s=8, alpha=0.4, c=force_all,
+                    cmap="viridis")
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("Sensed force (mN)")
+
+    # Static friction reference lines
+    ax.axhline(F_STATIC_LOW_MN / WEIGHT_MN, color="r", linestyle="--", alpha=0.5,
+               label=f"μ_s range: {F_STATIC_LOW_MN/WEIGHT_MN:.4f}–{F_STATIC_HIGH_MN/WEIGHT_MN:.4f}")
+    ax.axhline(F_STATIC_HIGH_MN / WEIGHT_MN, color="r", linestyle="--", alpha=0.5)
+
+    ax.set_xlabel("Shaft position (um)")
+    ax.set_ylabel("μ_d = F_friction / (m·g)")
+    ax.set_title(f"Faux positional Stribeck curve (m={M_SHAFT_KG} kg, t ≥ {T_IGNORE_S} s)")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
 
 def plot_stribeck_3d(friction_trials, force_levels):
     """Plot 3D Stribeck surface: position vs velocity vs μ_d, colored by sensed force."""
@@ -330,12 +366,12 @@ def plot_stribeck_3d(friction_trials, force_levels):
     mu_d_all = []
     force_all = []
 
-    for force_mN in force_levels:
+    for force_mN in force_levels[0:3]:
         recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
             positions_all.extend(r["position_um"][mask].tolist())
-            speeds_all.extend(np.abs(r["velocity_mm_s"][mask]).tolist())
+            speeds_all.extend(r["velocity_mm_s"][mask].tolist())
             mu_d_all.extend(r["mu_d"][mask].tolist())
             force_all.extend(r["force_mN"][mask].tolist())
 
@@ -345,7 +381,7 @@ def plot_stribeck_3d(friction_trials, force_levels):
     cbar.set_label("Sensed force (mN)")
 
     ax.set_xlabel("Position (µm)")
-    ax.set_ylabel("Shaft speed |v| (mm/s)")
+    ax.set_ylabel("Velocity (mm/s)")
     ax.set_zlabel("μ_d = F_friction / (m·g)")
     ax.set_title(f"3D Stribeck (m={M_SHAFT_KG} kg, t ≥ {T_IGNORE_S} s, shift={STREAM_FORCE_SHIFT})")
 
@@ -419,28 +455,28 @@ def main():
     print("\nGenerating velocity over time plot...")
     fig_vel = plot_velocity_over_time(friction_trials, force_levels)
     vel_path = os.path.join(EXPERIMENT_DIR, "velocity_over_time.png")
-    fig_vel.savefig(vel_path, dpi=150)
+    # fig_vel.savefig(vel_path, dpi=150)
     print(f"  Saved: {vel_path}")
 
     # --- Plot 2: Sensed force over time ---
     print("\nGenerating sensed force over time plot...")
     fig_fsense = plot_Fsensed_over_time(friction_trials, force_levels)
     fsense_path = os.path.join(EXPERIMENT_DIR, "Fsensed_over_time.png")
-    fig_fsense.savefig(fsense_path, dpi=150)
+    # fig_fsense.savefig(fsense_path, dpi=150)
     print(f"  Saved: {fsense_path}")
 
     # --- Plot 3: Measured acceleration over time ---
     print("\nGenerating acceleration over time plot...")
     fig_accel = plot_accel_over_time(friction_trials, force_levels)
     accel_path = os.path.join(EXPERIMENT_DIR, "accel_over_time.png")
-    fig_accel.savefig(accel_path, dpi=150)
+    # fig_accel.savefig(accel_path, dpi=150)
     print(f"  Saved: {accel_path}")
 
     # --- Plot 3: Stribeck curve ---
-    print("Generating Stribeck curve...")
+    print("Generating Stribeck curve (velocity vs coefficient)...")
     fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
     stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
-    fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
+    # fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_path}")
 
     # --- Plot 4: 3D Stribeck (position, velocity, μ_d) ---
@@ -450,8 +486,16 @@ def main():
           "Only force_sensed is shifted to align with acceleration.")
     fig_3d = plot_stribeck_3d(friction_trials, force_levels)
     stribeck_3d_path = os.path.join(EXPERIMENT_DIR, "stribeck_3d.png")
-    fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
+    # fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_3d_path}")
+
+    # --- Plot 5: Faux Stribeck with position vs mu_d ---
+    print("Generating Faux Stribeck plot (position, mu_d)")
+
+    fig_faux = plot_position_vs_mud_curve(friction_trials, force_levels)
+    faux_path = os.path.join(EXPERIMENT_DIR, "faux_stribeck.png")
+    # fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
+    print(f"  Saved: {faux_path}")
 
     # --- Save augmented data ---
     print("\nSaving augmented data with friction estimates...")

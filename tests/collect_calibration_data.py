@@ -198,6 +198,7 @@ def run_single_trial(motor, force_command_mN):
     Returns dict with arrays:
         t_stream, position_um, force_mN, t_accel, accel_mmpss, force_commanded_mN
     """
+    move_to_position(motor, target_pos_um=EXPERIMENT_MIN_POS_UM)
     t_stream_list = []
     position_list = []
     force_list = []
@@ -609,7 +610,7 @@ def main():
     print(f"  Force levels: {DEFAULT_FORCES_MN} mN")
     print(f"  Iterations per force: {DEFAULT_ITERS_PER_FORCE}")
     print(f"  Total trials: {DEFAULT_ITERS_PER_FORCE * len(DEFAULT_FORCES_MN)}")
-    print(f"  Position window: {MOTOR_MIN_UM} - {EXPERIMENT_MAX_POS_UM} um")
+    print(f"  Position window: {EXPERIMENT_MIN_POS_UM} - {EXPERIMENT_MAX_POS_UM} um")
     print(f"  Output directory: {DATA_DIR}/")
 
     print(f"\nProcedures:")

@@ -15,8 +15,8 @@ motor_min_um: 1300                   # minimum shaft position (micrometers)
 motor_max_um: 670000                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
-experiment_min_pos_um: 40000          # start of usable range (micrometers)
-experiment_max_pos_um: 550000       # end of usable range (micrometers)
+experiment_min_pos_um: 220000          # start of usable range (micrometers)
+experiment_max_pos_um: 520000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
 # Communication
@@ -35,26 +35,25 @@ auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-force_levels_mN: [-6500,
-                 -7000,
-                 -7500,
-                 -8000,
-                 -8500,
-                 -9000,
-                 -9500,
-                 -10000,
-                 -10500,
-                 -11000,
-                 -11500,
-                 -12000,
-                 -12500,
-                 -13000,
-                 -13500,
-                 -14000,
-                 -14500,
-                 -15000,
-                 6000,
-                 6500,
+# force_levels_mN: [
+#                  -7500,
+#                  -8000,
+#                  -8500,
+#                  -9000,
+#                  -9500,
+#                  -10000,
+#                  -10500,
+#                  -11000,
+#                  -11500,
+#                  -12000,
+#                  -12500,
+#                  -13000,
+#                  -13500,
+#                  -14000,
+#                  -14500,
+#                  -15000,
+#                 ]
+force_levels_mN: [
                  7000,
                  7500,
                  8000,
@@ -71,15 +70,25 @@ force_levels_mN: [-6500,
                  13500,
                  14000,
                  14500,
-                 15000
+                 15000,
+                 15500,
+                 16000,
+                 16500,
+                 17000,
+                 17500,
+                 18000,
+                 18500,
+                 19000,
+                 19500,
+                 20000
                  ]
-# force_levels_mN: [14000, 15000]
+
 iterations_per_force: 5
 
 # ---------------------------------------------------------------------------
 # Static friction estimation (force ramp procedure)
 # ---------------------------------------------------------------------------
-static_num_test_points: 3
+static_num_test_points: 21
 friction_force_start_mN: 1000       # starting force for ramp
 friction_force_step_mN: 100         # force increment per step
 friction_force_max_mN: 15000        # safety cap
