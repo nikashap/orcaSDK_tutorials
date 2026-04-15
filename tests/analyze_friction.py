@@ -419,7 +419,7 @@ def plot_stribeck_3d(friction_trials, force_levels):
     mu_d_all = []
     force_all = []
 
-    for force_mN in force_levels[0:3]:
+    for force_mN in force_levels:
         recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
