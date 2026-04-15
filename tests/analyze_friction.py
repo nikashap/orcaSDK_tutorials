@@ -3,9 +3,7 @@
 analyze_friction.py
 
 Analyze calibration data to produce:
-  1) Velocity over time graph (per force level). The velocity is a smoothed estimate from 
-    noisy position derivatives
-  2) Stribeck curve (μ_d vs shaft speed)
+  1) Several graphs that describe how position, velocity, and force command affect friction
   3) Augmented data file with friction coefficient estimates appended
 
 All parameters are read from calibration_params.yaml.
@@ -26,7 +24,7 @@ from scipy.interpolate import interp1d
 import yaml
 
 # ---------------------------------------------------------------------------
-# Parse CLI arguments (needed before loading YAML)
+# Parse CLI arguments
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -120,8 +118,6 @@ def load_master_data(filepath):
 
 def _velocity_savgol(pos_um, t, savgol_window, savgol_order):
     """Velocity via Savitzky-Golay analytical derivative (deriv=1).
-
-    Non-causal — uses a symmetric window centered on each sample.
     Using delta=mean(dt) because savgol_filter assumes uniform spacing.
     """
     mean_dt = np.mean(np.diff(t))
@@ -133,7 +129,7 @@ def _velocity_savgol(pos_um, t, savgol_window, savgol_order):
 def _velocity_rolling_window(pos_um, t, rw_window):
     """Velocity via rolling mean of finite differences.
 
-    Causal — v[i] is the mean of the last ``rw_window`` finite-difference
+    v[i] is the mean of the last ``rw_window`` finite-difference
     velocity samples: (pos[i]-pos[i-1])/dt, ..., (pos[i-k+1]-pos[i-k])/dt.
     The first ``rw_window`` samples use a growing window (all differences
     available so far) so no samples are NaN.
@@ -148,8 +144,6 @@ def _velocity_rolling_window(pos_um, t, rw_window):
     # Sample 0 gets the first available difference.
     cumsum = np.cumsum(np.concatenate([[0.0], v_inst]))
     for i in range(n):
-        # Index into v_inst: sample i corresponds to v_inst[i-1] (backward diff)
-        # We want to average v_inst[max(0, i-rw_window) : i]
         if i == 0:
             velocity_mm_s[0] = v_inst[0]  # only one difference available
         else:
@@ -166,20 +160,22 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
     For one trial, compute:
       - velocity (via the chosen estimator: SG or RW)
       - F_friction = F_sensed_shifted - m * a
-      - mu_d = F_friction / (m * g)   (signed, not absolute value)
+      - mu_d = F_friction / (m * g) (this is signed, NOT absolute value)
 
     Parameters
     ----------
     velocity_estimator : str
-        "SG" for Savitzky-Golay (non-causal), "RW" for rolling window (causal).
+        "SG" for Savitzky-Golay (non-causal, offline), "RW" for rolling window (causal, online).
     savgol_window, savgol_order : int
         Parameters for the SG estimator (ignored when velocity_estimator=="RW").
     rw_window : int
         Number of finite-difference samples to average for the RW estimator
         (ignored when velocity_estimator=="SG").
     shift : int
-        Frame shift to align force_sensed with acceleration. A positive shift
-        means force_mN[i] is paired with accel[i + shift].
+        Frame shift to align force_sensed with acceleration. The motor stream
+        (position, force_sensed) lags behind the real-time acceleration read
+        by ``shift`` frames. So force_sensed[i+shift] corresponds to accel[i].
+        We pair force_sensed[shift:n] with accel[0:n-shift].
 
     After shifting, only the overlapping region is kept — all arrays are
     trimmed to the same valid range.
@@ -209,22 +205,21 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
     n = len(t)
 
     # Apply frame shift to align force_sensed with acceleration.
-    # Positive shift: force_mN is shifted forward, meaning force_mN[i] corresponds
-    # to accel[i + shift]. We pair force_mN[0:n-shift] with accel[shift:n].
+    # Position and velocity are not aligned. In the experiment,
+    # the force sensed is approximated by the force command
     if shift > 0:
-        force_aligned = sensed_force[:n - shift]
-        accel_aligned = accel_at_stream[shift:]
-        # Trim all other arrays to match the accel (real-time) indices
-        t_trimmed = t[shift:]
-        pos_trimmed = pos_um[shift:]
-        vel_trimmed = velocity_mm_s[shift:]
+        force_aligned = sensed_force[shift:]
+        accel_aligned = accel_at_stream[:n - shift]
+        t_trimmed = t[:n - shift]
+        pos_trimmed = pos_um[:n - shift]
+        vel_trimmed = velocity_mm_s[:n - shift]
     elif shift < 0:
         abs_shift = abs(shift)
-        force_aligned = sensed_force[abs_shift:]
-        accel_aligned = accel_at_stream[:n - abs_shift]
-        t_trimmed = t[:n - abs_shift]
-        pos_trimmed = pos_um[:n - abs_shift]
-        vel_trimmed = velocity_mm_s[:n - abs_shift]
+        force_aligned = sensed_force[:n - abs_shift]
+        accel_aligned = accel_at_stream[abs_shift:]
+        t_trimmed = t[abs_shift:]
+        pos_trimmed = pos_um[abs_shift:]
+        vel_trimmed = velocity_mm_s[abs_shift:]
     else:
         force_aligned = sensed_force
         accel_aligned = accel_at_stream
@@ -369,6 +364,7 @@ def plot_stribeck_curve(friction_trials, force_levels):
     ax.axhline(F_STATIC_HIGH_MN / WEIGHT_MN, color="r", linestyle="--", alpha=0.5)
 
     ax.set_xlabel("Velocity (mm/s)")
+    ax.set_xlim(np.percentile(speeds_all, 2), np.percentile(speeds_all, 98))
     ax.set_ylabel("μ_d = F_friction / (m·g)")
     ax.set_title(f"Stribeck curve (m={M_SHAFT_KG} kg, t ≥ {T_IGNORE_S} s)")
     ax.legend(fontsize=8)
@@ -554,28 +550,28 @@ def main():
     print("\nGenerating velocity over time plot...")
     fig_vel = plot_velocity_over_time(friction_trials, force_levels)
     vel_path = os.path.join(EXPERIMENT_DIR, "velocity_over_time.png")
-    # fig_vel.savefig(vel_path, dpi=150)
+    fig_vel.savefig(vel_path, dpi=150)
     print(f"  Saved: {vel_path}")
 
     # --- Plot 2: Sensed force over time ---
     print("\nGenerating sensed force over time plot...")
     fig_fsense = plot_Fsensed_over_time(friction_trials, force_levels)
     fsense_path = os.path.join(EXPERIMENT_DIR, "Fsensed_over_time.png")
-    # fig_fsense.savefig(fsense_path, dpi=150)
+    fig_fsense.savefig(fsense_path, dpi=150)
     print(f"  Saved: {fsense_path}")
 
     # --- Plot 3: Measured acceleration over time ---
     print("\nGenerating acceleration over time plot...")
     fig_accel = plot_accel_over_time(friction_trials, force_levels)
     accel_path = os.path.join(EXPERIMENT_DIR, "accel_over_time.png")
-    # fig_accel.savefig(accel_path, dpi=150)
+    fig_accel.savefig(accel_path, dpi=150)
     print(f"  Saved: {accel_path}")
 
     # --- Plot 3: Stribeck curve ---
     print("Generating Stribeck curve (velocity vs coefficient)...")
     fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
     stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
-    # fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
+    fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_path}")
 
     # --- Plot 4: 3D Stribeck (position, velocity, μ_d) ---
@@ -585,7 +581,7 @@ def main():
           "Only force_sensed is shifted to align with acceleration.")
     fig_3d = plot_stribeck_3d(friction_trials, force_levels)
     stribeck_3d_path = os.path.join(EXPERIMENT_DIR, "stribeck_3d.png")
-    # fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
+    fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_3d_path}")
 
     # --- Plot 5: Faux Stribeck with position vs mu_d ---
@@ -593,7 +589,7 @@ def main():
 
     fig_faux = plot_position_vs_mud_curve(friction_trials, force_levels)
     faux_path = os.path.join(EXPERIMENT_DIR, "faux_stribeck.png")
-    # fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
+    fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {faux_path}")
 
     # --- Save augmented data ---

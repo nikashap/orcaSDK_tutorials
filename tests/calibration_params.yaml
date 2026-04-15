@@ -133,9 +133,10 @@ static_friction_high_mN: 5000.0     # upper bound of estimated static friction
 # Analysis: frame alignment (stream readback delay)
 # ---------------------------------------------------------------------------
 # The motor's command stream readback (position, force_sensed) lags behind
-# real-time acceleration reads by several frames due to USB latency buffering.
-# A positive shift means force_mN is shifted forward by `shift` frames to align
-# with the corresponding accel_mmpss sample. A negative shift means backward.
+# real-time acceleration reads by `shift` frames due to USB FIFO buffering.
+# force_sensed[i+shift] corresponds to accel[i]. In other words, the
+# force_sensed value that matches a given accel read won't appear in the
+# stream until `shift` frames later.
 # The optimal shift minimizes variance in F_friction = F_sensed - m*a.
 stream_force_shift: 3               # frame shift to align force_sensed with accel
 # USB-to-serial chip in use (e.g. "FT232R", "FT232H"). Affects USB latency
