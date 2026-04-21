@@ -98,6 +98,33 @@ friction_accel_threshold_mmpss: 50  # min mean |accel| to count as "moving"
 friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 
 # ---------------------------------------------------------------------------
+# Ramp-down (dynamic friction at low forces)
+# ---------------------------------------------------------------------------
+# "Running start" protocol: accelerate the shaft with a high startup force,
+# then switch to a lower target force mid-travel to capture friction during
+# deceleration / low-force coasting — regimes unreachable from rest.
+rampdown_startup_force_mN: 15000     # high force to get shaft moving
+rampdown_target_forces_mN: [         # forces to step down to (including 0 and negative)
+    0,
+    1000,
+    2000,
+    3000,
+    4000,
+    5000,
+    6000,
+]
+rampdown_switch_positions_um: [       # positions at which the force switches to the target
+    270000,
+    370000,
+]
+rampdown_starting_positions_um: [     # starting positions for the shaft before startup force
+    220000,
+    320000,
+    420000,
+]
+rampdown_iterations_per_combo: 3      # trials per (target_force, switch_position, starting_position) combo
+
+# ---------------------------------------------------------------------------
 # Data output
 # ---------------------------------------------------------------------------
 data_dir: "../data"

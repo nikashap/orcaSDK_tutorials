@@ -72,12 +72,21 @@ USB_CHIP = PARAMS.get("usb_chip", "unknown")
 # ---------------------------------------------------------------------------
 
 def load_master_data(filepath):
-    """Load the master .npz file and split into per-trial DataFrames-like dicts."""
+    """Load a master .npz file and split into per-trial dicts.
+
+    Handles both constant-force data (calibration_dynamic_friction.npz) and
+    ramp-down data (calibration_rampdown_friction.npz).  In both cases,
+    force_commanded_mN is returned as a per-sample array.  A scalar
+    force_label_mN is also included for grouping / plotting:
+      - constant-force trials: the commanded force level
+      - ramp-down trials: the target (post-switch) force
+    """
     data = np.load(filepath, allow_pickle=True)
 
     n_trials = int(data["n_trials"])
     boundaries = data["trial_boundaries"]
-    force_commanded = data["trial_force_commanded_mN"]
+
+    has_per_sample_force_cmd = "force_commanded_mN" in data
 
     t_stream_all = data["t_stream"]
     position_um_all = data["position_um"]
@@ -85,15 +94,29 @@ def load_master_data(filepath):
     t_accel_all = data["t_accel"]
     accel_mmpss_all = data["accel_mmpss"]
 
+    if has_per_sample_force_cmd:
+        force_cmd_all = data["force_commanded_mN"]
+        trial_labels = data["trial_target_force_mN"]
+    else:
+        force_cmd_per_trial = data["trial_force_commanded_mN"]
+
     trials = {}
     for i in range(n_trials):
         lo, hi = boundaries[i], boundaries[i + 1]
         t_stream = t_stream_all[lo:hi]
         t0 = t_stream[0] if len(t_stream) > 0 else 0.0
 
+        if has_per_sample_force_cmd:
+            force_cmd = force_cmd_all[lo:hi].astype(np.float64)
+            label = int(trial_labels[i])
+        else:
+            force_cmd = np.full(hi - lo, force_cmd_per_trial[i], dtype=np.float64)
+            label = int(force_cmd_per_trial[i])
+
         trials[i + 1] = {
             "trial_num": i + 1,
-            "force_commanded_mN": int(force_commanded[i]),
+            "force_commanded_mN": force_cmd,
+            "force_label_mN": label,
             "t_stream_s": t_stream - t0,
             "t_accel_s": t_accel_all[lo:hi] - t0,
             "position_um": position_um_all[lo:hi].astype(np.float64),
@@ -101,12 +124,16 @@ def load_master_data(filepath):
             "accel_mmpss": accel_mmpss_all[lo:hi].astype(np.float64),
         }
 
+    if has_per_sample_force_cmd:
+        force_levels = sorted(set(int(trial_labels[i]) for i in range(n_trials)))
+    else:
+        force_levels = data["force_levels_mN"].tolist()
+
     metadata = {
         "mass_shaft_kg": float(data["mass_shaft_kg"]),
         "motor_min_um": int(data["motor_min_um"]),
         "motor_max_um": int(data["motor_max_um"]),
-        "force_levels_mN": data["force_levels_mN"].tolist(),
-        "iterations_per_force": int(data["iterations_per_force"]),
+        "force_levels_mN": force_levels,
     }
 
     return trials, metadata
@@ -180,11 +207,15 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
     After shifting, only the overlapping region is kept — all arrays are
     trimmed to the same valid range.
 
-    Returns a dict with all original fields (trimmed) plus velocity, friction, mu_d.
+    Returns a dict with all original fields (trimmed) plus velocity, friction,
+    mu_d, force_commanded_mN (per-sample, trimmed), and
+    force_sensed_unshifted_mN (sensed force at the same timepoint as
+    position/velocity — NOT shift-aligned to accel).
     """
     t = trial["t_stream_s"]
     pos_um = trial["position_um"]
     sensed_force = trial["force_mN"]
+    force_commanded = trial["force_commanded_mN"]
     t_accel = trial["t_accel_s"]
     accel_raw = trial["accel_mmpss"]
 
@@ -205,14 +236,18 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
     n = len(t)
 
     # Apply frame shift to align force_sensed with acceleration.
-    # Position and velocity are not aligned. In the experiment,
-    # the force sensed is approximated by the force command
+    # Position, velocity, and force_commanded are NOT shifted — they stay at
+    # the stream timepoint.  force_sensed_unshifted is also at the stream
+    # timepoint (same frame as position).  force_aligned (used for friction
+    # calculation) is the shifted force_sensed that corresponds to accel.
     if shift > 0:
         force_aligned = sensed_force[shift:]
         accel_aligned = accel_at_stream[:n - shift]
         t_trimmed = t[:n - shift]
         pos_trimmed = pos_um[:n - shift]
         vel_trimmed = velocity_mm_s[:n - shift]
+        force_cmd_trimmed = force_commanded[:n - shift]
+        force_sensed_unshifted = sensed_force[:n - shift]
     elif shift < 0:
         abs_shift = abs(shift)
         force_aligned = sensed_force[:n - abs_shift]
@@ -220,12 +255,16 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
         t_trimmed = t[abs_shift:]
         pos_trimmed = pos_um[abs_shift:]
         vel_trimmed = velocity_mm_s[abs_shift:]
+        force_cmd_trimmed = force_commanded[abs_shift:]
+        force_sensed_unshifted = sensed_force[abs_shift:]
     else:
         force_aligned = sensed_force
         accel_aligned = accel_at_stream
         t_trimmed = t
         pos_trimmed = pos_um
         vel_trimmed = velocity_mm_s
+        force_cmd_trimmed = force_commanded
+        force_sensed_unshifted = sensed_force
 
     # F_friction = F_sensed_aligned - m * a  (all in mN, since kg * mm/s² = mN)
     f_friction_mN = force_aligned - M_SHAFT_KG * accel_aligned
@@ -235,10 +274,12 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
 
     return {
         "trial_num": trial["trial_num"],
-        "force_commanded_mN": trial["force_commanded_mN"],
+        "force_label_mN": trial["force_label_mN"],
+        "force_commanded_mN": force_cmd_trimmed,
         "t_stream_s": t_trimmed,
         "position_um": pos_trimmed,
         "force_mN": force_aligned,
+        "force_sensed_unshifted_mN": force_sensed_unshifted,
         "accel_mmpss": accel_aligned,
         "accel_interp_mmpss": accel_aligned,
         "velocity_mm_s": vel_trimmed,
@@ -262,7 +303,7 @@ def plot_velocity_over_time(friction_trials, force_levels):
 
     for i, force_mN in enumerate(force_levels):
         ax = axes[i]
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for j, r in enumerate(recs):
             ax.plot(r["t_stream_s"], r["velocity_mm_s"],
                     linewidth=0.8, color=colors[j % len(colors)],
@@ -293,7 +334,7 @@ def plot_Fsensed_over_time(friction_trials, force_levels):
 
     for i, force_mN in enumerate(force_levels): 
         ax = axes[i]
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for j, r in enumerate(recs):
             ax.plot(r["t_stream_s"], r["force_mN"],
                     linewidth=0.8, color=colors[j % len(colors)],
@@ -319,7 +360,7 @@ def plot_accel_over_time(friction_trials, force_levels):
 
     for i, force_mN in enumerate(force_levels): 
         ax = axes[i]
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for j, r in enumerate(recs):
             ax.plot(r["t_stream_s"], r["accel_mmpss"],
                     linewidth=0.8, color=colors[j % len(colors)],
@@ -343,7 +384,7 @@ def plot_stribeck_curve(friction_trials, force_levels):
     force_all = []
 
     for force_mN in force_levels:
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
             speed = r["velocity_mm_s"][mask]
@@ -381,7 +422,7 @@ def plot_position_vs_mud_curve(friction_trials, force_levels):
     force_all = []
 
     for force_mN in force_levels:
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
             speed = r["position_um"][mask]
@@ -420,7 +461,7 @@ def plot_stribeck_3d(friction_trials, force_levels):
     force_all = []
 
     for force_mN in force_levels[0:3]:
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
         for r in recs:
             mask = r["t_stream_s"] >= T_IGNORE_S
             positions_all.extend(r["position_um"][mask].tolist())
@@ -446,23 +487,28 @@ def plot_stribeck_3d(friction_trials, force_levels):
 # Save augmented data
 # ---------------------------------------------------------------------------
 
-def save_augmented_data(filepath_in, friction_trials):
+def save_augmented_data(experiment_dir, friction_trials, metadata):
     """
     Save a new .npz with all per-sample arrays aligned after shift trimming.
 
     The shift in compute_friction_for_trial trims each trial by `shift` samples.
     All per-sample arrays here come from the trimmed friction_trials dicts, so
-    position_um, force_mN, accel_mmpss, velocity_mm_s, f_friction_mN, and mu_d
-    are guaranteed to be the same length and sample-aligned.
+    every array is guaranteed to be the same length and sample-aligned.
 
-    The raw (untrimmed) data is preserved in calibration_dynamic_friction.npz.
+    Includes per-sample force_commanded_mN and force_sensed_unshifted_mN
+    (sensed force at the same timepoint as position/velocity, before shift
+    alignment — useful as a potential model input).
     """
-    original = np.load(filepath_in, allow_pickle=True)
-
     # Concatenate trimmed+aligned per-sample arrays from friction_trials
     t_stream_all = np.concatenate([r["t_stream_s"] for r in friction_trials])
     position_all = np.concatenate([r["position_um"] for r in friction_trials])
     force_sensed_all = np.concatenate([r["force_mN"] for r in friction_trials])
+    force_sensed_unshifted_all = np.concatenate(
+        [r["force_sensed_unshifted_mN"] for r in friction_trials]
+    )
+    force_commanded_all = np.concatenate(
+        [r["force_commanded_mN"] for r in friction_trials]
+    )
     accel_all = np.concatenate([r["accel_mmpss"] for r in friction_trials])
     velocity_all = np.concatenate([r["velocity_mm_s"] for r in friction_trials])
     f_friction_all = np.concatenate([r["f_friction_mN"] for r in friction_trials])
@@ -472,24 +518,32 @@ def save_augmented_data(filepath_in, friction_trials):
     trial_n_samples = np.array([len(r["mu_d"]) for r in friction_trials],
                                dtype=np.int32)
     trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples)])
+    trial_force_labels = np.array([r["force_label_mN"] for r in friction_trials],
+                                  dtype=np.int32)
 
-    # Build output: metadata from original + trimmed per-sample arrays
     out = {}
-    for key in ["mass_shaft_kg", "motor_min_um", "motor_max_um",
-                "experiment_min_pos_um", "experiment_max_pos_um",
-                "force_levels_mN", "iterations_per_force", "n_trials",
-                "trial_force_commanded_mN"]:
-        out[key] = original[key]
+
+    # Metadata
+    out["mass_shaft_kg"] = metadata["mass_shaft_kg"]
+    out["motor_min_um"] = metadata["motor_min_um"]
+    out["motor_max_um"] = metadata["motor_max_um"]
+    out["force_levels_mN"] = np.array(metadata["force_levels_mN"], dtype=np.int32)
+    out["n_trials"] = len(friction_trials)
 
     out["trial_n_samples"] = trial_n_samples
     out["trial_boundaries"] = trial_boundaries
+    out["trial_force_label_mN"] = trial_force_labels
 
-    # Trimmed and aligned per-sample arrays
+    # Per-sample arrays — names indicate alignment relative to acceleration.
+    # "aligned" = shift-corrected to match the acceleration reading.
+    # "unshifted" = at the original stream timepoint (same frame as position).
     out["t_stream_s"] = t_stream_all
-    out["position_um"] = position_all
-    out["force_mN"] = force_sensed_all
-    out["accel_mmpss"] = accel_all
-    out["velocity_mm_s"] = velocity_all
+    out["position_um_unshifted"] = position_all
+    out["force_mN_aligned"] = force_sensed_all
+    out["force_sensed_unshifted_mN"] = force_sensed_unshifted_all
+    out["force_commanded_mN"] = force_commanded_all
+    out["accel_mmpss_aligned"] = accel_all
+    out["velocity_mm_s_unshifted"] = velocity_all
     out["f_friction_mN"] = f_friction_all
     out["mu_d"] = mu_d_all
 
@@ -500,9 +554,7 @@ def save_augmented_data(filepath_in, friction_trials):
     out["rw_window"] = RW_WINDOW
     out["stream_force_shift"] = STREAM_FORCE_SHIFT
 
-    # Save alongside the original
-    dir_name = os.path.dirname(filepath_in)
-    out_path = os.path.join(dir_name, "stribeck_data.npz")
+    out_path = os.path.join(experiment_dir, "stribeck_data.npz")
     np.savez(out_path, **out)
     print(f"Saved augmented data: {out_path}")
     return out_path
@@ -513,17 +565,49 @@ def save_augmented_data(filepath_in, friction_trials):
 # ---------------------------------------------------------------------------
 
 def main():
-    data_path = _args.data or os.path.join(EXPERIMENT_DIR, "calibration_dynamic_friction.npz")
+    # Locate data files — load constant-force and/or ramp-down
+    const_path = os.path.join(EXPERIMENT_DIR, "calibration_dynamic_friction.npz")
+    rampdown_path = os.path.join(EXPERIMENT_DIR, "calibration_rampdown_friction.npz")
 
-    if not os.path.exists(data_path):
-        print(f"ERROR: Data file not found: {data_path}")
-        print("Run collect_calibration_data.py first (procedure 1 or 3).")
+    if _args.data:
+        data_paths = [_args.data]
+    else:
+        data_paths = [p for p in [const_path, rampdown_path] if os.path.exists(p)]
+
+    if not data_paths:
+        print(f"ERROR: No data files found in {EXPERIMENT_DIR}")
+        print("Run collect_calibration_data.py first.")
         return
 
-    print(f"Loading data from: {data_path}")
-    trials, metadata = load_master_data(data_path)
-    force_levels = metadata["force_levels_mN"]
-    print(f"Loaded {len(trials)} trials across force levels {force_levels}")
+    # Load and merge trials from all data files
+    all_trials = {}
+    all_force_levels = set()
+    merged_metadata = None
+    trial_offset = 0
+
+    for data_path in data_paths:
+        print(f"Loading data from: {data_path}")
+        trials, metadata = load_master_data(data_path)
+
+        if merged_metadata is None:
+            merged_metadata = metadata
+        else:
+            all_force_levels.update(merged_metadata["force_levels_mN"])
+
+        all_force_levels.update(metadata["force_levels_mN"])
+
+        for tnum in sorted(trials.keys()):
+            renumbered = trial_offset + tnum
+            trial = trials[tnum]
+            trial["trial_num"] = renumbered
+            all_trials[renumbered] = trial
+
+        trial_offset += len(trials)
+        print(f"  {len(trials)} trials loaded")
+
+    force_levels = sorted(all_force_levels)
+    merged_metadata["force_levels_mN"] = force_levels
+    print(f"\nTotal: {len(all_trials)} trials across force levels {force_levels}")
 
     print(f"\nVelocity estimator: {VELOCITY_ESTIMATOR}")
     if VELOCITY_ESTIMATOR == "SG":
@@ -535,9 +619,9 @@ def main():
 
     # Compute friction for each trial (in trial order)
     friction_trials = []
-    for tnum in sorted(trials.keys()):
+    for tnum in sorted(all_trials.keys()):
         result = compute_friction_for_trial(
-            trials[tnum],
+            all_trials[tnum],
             velocity_estimator=VELOCITY_ESTIMATOR,
             savgol_window=SAVGOL_WINDOW,
             savgol_order=SAVGOL_ORDER,
@@ -567,14 +651,14 @@ def main():
     fig_accel.savefig(accel_path, dpi=150)
     print(f"  Saved: {accel_path}")
 
-    # --- Plot 3: Stribeck curve ---
+    # --- Plot 4: Stribeck curve ---
     print("Generating Stribeck curve (velocity vs coefficient)...")
     fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
     stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
     fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_path}")
 
-    # --- Plot 4: 3D Stribeck (position, velocity, μ_d) ---
+    # --- Plot 5: 3D Stribeck (position, velocity, μ_d) ---
     print("Generating 3D Stribeck plot (position, velocity, μ_d)...")
     print("  NOTE: Position and velocity values are NOT shifted by the "
           f"stream_force_shift={STREAM_FORCE_SHIFT} parameter. "
@@ -584,9 +668,8 @@ def main():
     fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {stribeck_3d_path}")
 
-    # --- Plot 5: Faux Stribeck with position vs mu_d ---
+    # --- Plot 6: Faux Stribeck with position vs mu_d ---
     print("Generating Faux Stribeck plot (position, mu_d)")
-
     fig_faux = plot_position_vs_mud_curve(friction_trials, force_levels)
     faux_path = os.path.join(EXPERIMENT_DIR, "faux_stribeck.png")
     fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
@@ -594,16 +677,20 @@ def main():
 
     # --- Save augmented data ---
     print("\nSaving augmented data with friction estimates...")
-    save_augmented_data(data_path, friction_trials)
+    save_augmented_data(EXPERIMENT_DIR, friction_trials, merged_metadata)
 
     # --- Summary statistics ---
     print(f"\n{'='*60}")
     print("FRICTION SUMMARY")
     print(f"{'='*60}")
     for force_mN in force_levels:
-        recs = [r for r in friction_trials if r["force_commanded_mN"] == force_mN]
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
+        if not recs:
+            continue
         all_mu = np.concatenate([r["mu_d"][r["t_stream_s"] >= T_IGNORE_S] for r in recs])
         all_fric = np.concatenate([r["f_friction_mN"][r["t_stream_s"] >= T_IGNORE_S] for r in recs])
+        if len(all_mu) == 0:
+            continue
         print(f"  F_cmd={force_mN:6d} mN | "
               f"F_friction={np.mean(all_fric):7.1f} ± {np.std(all_fric):6.1f} mN | "
               f"μ_d={np.mean(all_mu):.4f} ± {np.std(all_mu):.4f}")
