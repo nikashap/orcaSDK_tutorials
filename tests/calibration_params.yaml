@@ -15,7 +15,7 @@ motor_min_um: 1300                   # minimum shaft position (micrometers)
 motor_max_um: 670000                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
-experiment_min_pos_um: 220000          # start of usable range (micrometers)
+experiment_min_pos_um: 270000          # start of usable range (micrometers)
 experiment_max_pos_um: 520000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ savgol_window: 15                   # window length for Savitzky-Golay filter
 savgol_order: 2                     # polynomial order for Savitzky-Golay filter
 
 # Rolling window parameters (used when velocity_estimator == "RW")
-rw_window: 5                        # number of finite-difference samples to average
+rw_window: 3                        # number of finite-difference samples to average
 
 # ---------------------------------------------------------------------------
 # Analysis: friction estimation
