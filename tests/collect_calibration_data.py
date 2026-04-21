@@ -6,9 +6,11 @@ Collect data from the ORCA motor for estimating shaft mass and friction.
 All parameters are read from calibration_params.yaml.
 
 Procedures:
-  1) Mass estimation — constant force trials, all saved to one master .npz
+  1) Dynamic friction estimation — constant force trials, saved to one master .npz
   2) Static friction estimation — force ramp, saved to a separate .npz
-  3) Both (friction first, then mass estimation)
+  3) Both (static first, then dynamic)
+  4) Ramp-down — low-force / coasting friction from running start
+  5) All (static, then dynamic, then ramp-down)
 
 Master file layout (mass estimation):
   - metadata fields: mass_shaft_kg, motor_min_um, motor_max_um,
@@ -73,6 +75,14 @@ FRICTION_SAMPLES_PER_STEP = PARAMS["friction_samples_per_step"]
 FRICTION_SETTLE_TIME_S = PARAMS["friction_settle_time_s"]
 FRICTION_ACCEL_THRESHOLD_MMPSS = PARAMS["friction_accel_threshold_mmpss"]
 FRICTION_POS_CHANGE_THRESHOLD_UM = PARAMS["friction_pos_change_threshold_um"]
+
+# Ramp-down parameters
+RAMPDOWN_STARTUP_FORCE_MN = PARAMS.get("rampdown_startup_force_mN", 12000)
+RAMPDOWN_TARGET_FORCES_MN = PARAMS.get("rampdown_target_forces_mN", [0])
+RAMPDOWN_SWITCH_POSITIONS_UM = PARAMS.get("rampdown_switch_positions_um", [370000])
+RAMPDOWN_STARTING_POSITIONS_UM = PARAMS.get("rampdown_starting_positions_um",
+                                            [EXPERIMENT_MIN_POS_UM])
+RAMPDOWN_ITERATIONS_PER_COMBO = PARAMS.get("rampdown_iterations_per_combo", 3)
 
 
 def auto_zero_motor(motor):
@@ -344,6 +354,7 @@ def collect_data(motor,
     np.savez(
         filepath,
         # Metadata
+        procedure_type="constant",
         mass_shaft_kg=PARAMS["mass_shaft_kg"],
         motor_min_um=MOTOR_MIN_UM,
         motor_max_um=MOTOR_MAX_UM,
@@ -364,6 +375,268 @@ def collect_data(motor,
         accel_mmpss=np.concatenate(all_accel_mmpss) if all_accel_mmpss else np.array([], dtype=np.int32),
     )
     print(f"\nSaved master data file: {filepath}")
+    print(f"Total trials: {len(trial_n_samples)}/{total_trials}")
+    print(f"Total samples: {sum(trial_n_samples)}")
+
+    return trial_n_samples
+
+
+# ---------------------------------------------------------------------------
+# Ramp-down (dynamic friction at low forces)
+# ---------------------------------------------------------------------------
+
+def run_rampdown_trial(motor, startup_force_mN, target_force_mN,
+                       switch_pos_um, start_pos_um):
+    """
+    Run one ramp-down trial: move the shaft to start_pos_um, command a high
+    startup force to get the shaft moving, then switch to a lower target force
+    once the shaft passes switch_pos_um.  Record data for the entire trial.
+
+    For positive startup force the shaft travels toward EXPERIMENT_MAX_POS_UM.
+    For negative startup force the shaft travels toward EXPERIMENT_MIN_POS_UM.
+
+    Returns dict with arrays:
+        t_stream, position_um, force_mN, t_accel, accel_mmpss,
+        force_commanded_mN (per-sample, changes at switch point),
+        switch_index (sample index where force switched)
+    """
+    move_to_position(motor, target_pos_um=start_pos_um)
+
+    t_stream_list = []
+    position_list = []
+    force_list = []
+    t_accel_list = []
+    accel_list = []
+    force_cmd_list = []
+
+    motor.set_mode(MotorMode.ForceMode)
+    motor.set_streamed_force_mN(startup_force_mN)
+
+    moving_positive = startup_force_mN >= 0
+
+    switched = False
+    switch_index = -1
+    consecutive_slow = 0
+    prev_pos = None
+
+    while True:
+        motor.run()
+        t1 = time.perf_counter()
+
+        stream_data = motor.get_stream_data()
+        pos_um = stream_data.position
+        force_mN = stream_data.force
+
+        accel_mmpss = read_raw_acceleration(motor)
+        t2 = time.perf_counter()
+
+        if not switched:
+            reached_switch = (pos_um >= switch_pos_um if moving_positive
+                              else pos_um <= switch_pos_um)
+            if reached_switch:
+                motor.set_streamed_force_mN(target_force_mN)
+                switched = True
+                switch_index = len(t_stream_list)
+                print(f"    Switched to {target_force_mN} mN at position {pos_um} um "
+                      f"(sample {switch_index})")
+
+        current_cmd = target_force_mN if switched else startup_force_mN
+
+        t_stream_list.append(t1)
+        position_list.append(pos_um)
+        force_list.append(force_mN)
+        t_accel_list.append(t2)
+        accel_list.append(accel_mmpss)
+        force_cmd_list.append(current_cmd)
+
+        if moving_positive and pos_um >= EXPERIMENT_MAX_POS_UM:
+            break
+        if not moving_positive and pos_um <= EXPERIMENT_MIN_POS_UM:
+            break
+
+        if switched and prev_pos is not None:
+            if abs(pos_um - prev_pos) < 5:
+                consecutive_slow += 1
+            else:
+                consecutive_slow = 0
+            if consecutive_slow > 50:
+                print(f"    Shaft stopped after switch (position ~{pos_um} um)")
+                break
+
+        prev_pos = pos_um
+
+        if stream_data.errors:
+            print(f"    Motor error: {stream_data.errors}")
+            break
+
+    motor.set_mode(MotorMode.SleepMode)
+
+    return {
+        "t_stream": np.array(t_stream_list, dtype=np.float64),
+        "position_um": np.array(position_list, dtype=np.int32),
+        "force_mN": np.array(force_list, dtype=np.int32),
+        "t_accel": np.array(t_accel_list, dtype=np.float64),
+        "accel_mmpss": np.array(accel_list, dtype=np.int32),
+        "force_commanded_mN": np.array(force_cmd_list, dtype=np.int32),
+        "switch_index": switch_index,
+    }
+
+
+def collect_rampdown_data(motor,
+                          startup_force_mN=RAMPDOWN_STARTUP_FORCE_MN,
+                          target_forces_mN=None,
+                          switch_positions_um=None,
+                          starting_positions_um=None,
+                          iters_per_combo=RAMPDOWN_ITERATIONS_PER_COMBO):
+    """
+    Collect ramp-down trials across all
+    (target_force, switch_position, starting_position) combos.
+    Saves everything into one master .npz file.
+
+    Infeasible combos are skipped:
+      - positive startup force + starting_pos > switch_pos
+      - negative startup force + starting_pos < switch_pos
+    """
+    if target_forces_mN is None:
+        target_forces_mN = RAMPDOWN_TARGET_FORCES_MN
+    if switch_positions_um is None:
+        switch_positions_um = RAMPDOWN_SWITCH_POSITIONS_UM
+    if starting_positions_um is None:
+        starting_positions_um = RAMPDOWN_STARTING_POSITIONS_UM
+
+    # Enforce same-sign target forces
+    signs = set(1 if f >= 0 else -1 for f in target_forces_mN)
+    if len(signs) > 1:
+        print("WARNING: rampdown_target_forces_mN contains both positive and "
+              "negative values. All target forces should be the same sign.")
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # Build combos, skipping infeasible ones
+    combos = []
+    for tf in target_forces_mN:
+        for sp in switch_positions_um:
+            for stp in starting_positions_um:
+                if startup_force_mN >= 0 and stp > sp:
+                    print(f"  Skipping infeasible combo: start={stp} > "
+                          f"switch={sp} with positive startup force")
+                    continue
+                if startup_force_mN < 0 and stp < sp:
+                    print(f"  Skipping infeasible combo: start={stp} < "
+                          f"switch={sp} with negative startup force")
+                    continue
+                combos.append((tf, sp, stp))
+
+    total_trials = len(combos) * iters_per_combo
+    print(f"\nRamp-down: {len(combos)} feasible combos × "
+          f"{iters_per_combo} iters = {total_trials} trials")
+
+    all_t_stream = []
+    all_position_um = []
+    all_force_mN = []
+    all_t_accel = []
+    all_accel_mmpss = []
+    all_force_commanded_mN = []
+
+    trial_n_samples = []
+    trial_target_force = []
+    trial_switch_position = []
+    trial_starting_position = []
+    trial_switch_index = []
+
+    motor.set_mode(MotorMode.SleepMode)
+    motor.clear_errors()
+    motor.enable_stream()
+
+    trial_num = 0
+
+    try:
+        for target_force, switch_pos, start_pos in combos:
+            for iteration in range(iters_per_combo):
+                trial_num += 1
+                print(f"\n--- Ramp-down trial {trial_num}/{total_trials}: "
+                      f"start={start_pos} um, "
+                      f"startup={startup_force_mN} mN → target={target_force} mN "
+                      f"at {switch_pos} um, iter={iteration+1}/{iters_per_combo} ---")
+
+                print("  Auto-zeroing...")
+                error = auto_zero_motor(motor)
+                if error.value != 0:
+                    print(f"  WARNING: Auto-zero returned error {error.value}, skipping.")
+                    continue
+
+                motor.enable_stream()
+                time.sleep(0.3)
+
+                trial_data = run_rampdown_trial(
+                    motor, startup_force_mN, target_force, switch_pos, start_pos
+                )
+
+                n_samples = len(trial_data["t_stream"])
+                print(f"  Recorded {n_samples} samples, "
+                      f"switch at sample {trial_data['switch_index']}, "
+                      f"position range: {trial_data['position_um'][0]} - "
+                      f"{trial_data['position_um'][-1]} um")
+
+                all_t_stream.append(trial_data["t_stream"])
+                all_position_um.append(trial_data["position_um"])
+                all_force_mN.append(trial_data["force_mN"])
+                all_t_accel.append(trial_data["t_accel"])
+                all_accel_mmpss.append(trial_data["accel_mmpss"])
+                all_force_commanded_mN.append(trial_data["force_commanded_mN"])
+
+                trial_n_samples.append(n_samples)
+                trial_target_force.append(target_force)
+                trial_switch_position.append(switch_pos)
+                trial_starting_position.append(start_pos)
+                trial_switch_index.append(trial_data["switch_index"])
+
+                time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user.")
+    except Exception as e:
+        print(f"\nError during collection: {e}")
+        raise
+    finally:
+        motor.set_mode(MotorMode.SleepMode)
+
+    filepath = os.path.join(DATA_DIR, "calibration_rampdown_friction.npz")
+
+    trial_n_samples_arr = np.array(trial_n_samples, dtype=np.int32)
+    trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples_arr)])
+
+    np.savez(
+        filepath,
+        # Metadata
+        procedure_type="rampdown",
+        mass_shaft_kg=PARAMS["mass_shaft_kg"],
+        motor_min_um=MOTOR_MIN_UM,
+        motor_max_um=MOTOR_MAX_UM,
+        experiment_min_pos_um=PARAMS["experiment_min_pos_um"],
+        experiment_max_pos_um=EXPERIMENT_MAX_POS_UM,
+        startup_force_mN=startup_force_mN,
+        target_forces_mN=np.array(target_forces_mN, dtype=np.int32),
+        switch_positions_um=np.array(switch_positions_um, dtype=np.int32),
+        starting_positions_um=np.array(starting_positions_um, dtype=np.int32),
+        iterations_per_combo=iters_per_combo,
+        n_trials=len(trial_n_samples),
+        # Per-trial arrays
+        trial_target_force_mN=np.array(trial_target_force, dtype=np.int32),
+        trial_switch_position_um=np.array(trial_switch_position, dtype=np.int32),
+        trial_starting_position_um=np.array(trial_starting_position, dtype=np.int32),
+        trial_switch_index=np.array(trial_switch_index, dtype=np.int32),
+        trial_n_samples=trial_n_samples_arr,
+        trial_boundaries=trial_boundaries,
+        # Concatenated per-sample arrays
+        t_stream=np.concatenate(all_t_stream) if all_t_stream else np.array([], dtype=np.float64),
+        position_um=np.concatenate(all_position_um) if all_position_um else np.array([], dtype=np.int32),
+        force_mN=np.concatenate(all_force_mN) if all_force_mN else np.array([], dtype=np.int32),
+        force_commanded_mN=np.concatenate(all_force_commanded_mN) if all_force_commanded_mN else np.array([], dtype=np.int32),
+        t_accel=np.concatenate(all_t_accel) if all_t_accel else np.array([], dtype=np.float64),
+        accel_mmpss=np.concatenate(all_accel_mmpss) if all_accel_mmpss else np.array([], dtype=np.int32),
+    )
+    print(f"\nSaved ramp-down data file: {filepath}")
     print(f"Total trials: {len(trial_n_samples)}/{total_trials}")
     print(f"Total samples: {sum(trial_n_samples)}")
 
@@ -615,15 +888,19 @@ def main():
     print(f"  1) Dynamic friction estimation (constant force trials)")
     print(f"  2) Static friction estimation (force ramp)")
     print(f"  3) Both (static first, then dynamic)")
-    procedure = input("Select procedure [1/2/3]: ").strip() or "1"
+    print(f"  4) Ramp-down (low-force / coasting friction from running start)")
+    print(f"  5) All (static, then dynamic, then ramp-down)")
+    procedure = input("Select procedure [1/2/3/4/5]: ").strip() or "1"
 
     input("\nPress Enter to begin data collection...")
 
     try:
-        if procedure in ("2", "3"):
+        if procedure in ("2", "3", "5"):
             collect_static_friction_data(motor)
-        if procedure in ("1", "3"):
+        if procedure in ("1", "3", "5"):
             collect_data(motor)
+        if procedure in ("4", "5"):
+            collect_rampdown_data(motor)
     finally:
         print("\nShutting down motor...")
         try:
