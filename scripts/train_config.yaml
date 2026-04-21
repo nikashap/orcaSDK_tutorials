@@ -1,0 +1,57 @@
+# ============================================================================
+# Friction Model Training Configuration
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Data preparation
+# ---------------------------------------------------------------------------
+# List of date folder names under orcaSDK_tutorials/data/ to include.
+# Each must contain a stribeck_data.npz and calibration_params.yaml.
+data_dates:
+  - "26_04_14-14_49_13"
+  - "26_04_14-15_12_51"
+
+# Train / validation / test split ratios (by trial, not by sample).
+# Must sum to 1.0.
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+
+# Random seed for reproducible trial shuffling and weight init
+seed: 42
+
+# Discard samples from the first t_ignore_s seconds of each trial
+# (static breakaway transient). Loaded from the experiment YAML by default;
+# set here to override.
+# t_ignore_s_override: null
+
+# Data augmentation: create a mirror of each training sample with the sign
+# of velocity_mm_s_unshifted flipped. Doubles the training set size.
+augment_velocity_flip: true
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
+# Input features: position_um_unshifted, velocity_mm_s_unshifted, force_mN_aligned (3 total)
+# Output: mu_d (1 scalar)
+hidden_dims: [32, 32]        # list of hidden layer widths
+activation: "relu"           # "relu", "tanh", or "leaky_relu"
+dropout: 0.0                 # dropout probability (0 = no dropout)
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+batch_size: 256
+epochs: 200
+learning_rate: 1.0e-3
+weight_decay: 1.0e-4         # L2 regularization
+lr_scheduler: "plateau"      # "plateau", "cosine", or "none"
+plateau_patience: 10         # epochs with no val improvement before LR reduction
+plateau_factor: 0.5          # LR multiplied by this on plateau
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+# All outputs (model checkpoint, training curves, config snapshot) are saved
+# to this directory. Relative to orcaSDK_tutorials/.
+output_dir: "models/friction"
