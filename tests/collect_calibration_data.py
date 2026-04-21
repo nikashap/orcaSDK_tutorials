@@ -208,7 +208,11 @@ def run_single_trial(motor, force_command_mN):
     Returns dict with arrays:
         t_stream, position_um, force_mN, t_accel, accel_mmpss, force_commanded_mN
     """
-    move_to_position(motor, target_pos_um=EXPERIMENT_MIN_POS_UM)
+    if force_command_mN > 0:
+        move_to_position(motor, target_pos_um=EXPERIMENT_MIN_POS_UM)
+    elif force_command_mN < 0:
+        move_to_position(motor, target_pos_um=EXPERIMENT_MAX_POS_UM)
+    
     t_stream_list = []
     position_list = []
     force_list = []
@@ -291,7 +295,7 @@ def collect_data(motor,
 
     try:
         for force_mN in forces_mN_list:
-            if force_mN > FORCE_SAFETY_LIMIT_MN:
+            if np.abs(force_mN) > np.abs(FORCE_SAFETY_LIMIT_MN):
                 raise ValueError(f"Force command {force_mN} mN exceeds safety limit of {FORCE_SAFETY_LIMIT_MN} mN")
             
             for iteration in range(iters_per_force):
@@ -299,22 +303,16 @@ def collect_data(motor,
                 print(f"\n--- Trial {trial_num}/{total_trials}: "
                       f"force={force_mN} mN, iter={iteration+1}/{iters_per_force} ---")
 
-                if force_mN >= 0:
-                    # Positive force: auto-zero moves shaft to min position,
-                    # then force drives it toward max
-                    print("  Auto-zeroing...")
-                    error = auto_zero_motor(motor)
-                    if error.value != 0:
-                        print(f"  WARNING: Auto-zero returned error {error.value}, skipping trial.")
-                        continue
+                # Positive force: auto-zero moves shaft to min position,
+                # then force drives it toward max
+                print("  Auto-zeroing...")
+                error = auto_zero_motor(motor)
+                if error.value != 0:
+                    print(f"  WARNING: Auto-zero returned error {error.value}, skipping trial.")
+                    continue
 
-                    motor.enable_stream()
-                    time.sleep(0.3)
-                else:
-                    # Negative force: smoothly move to experiment_max_pos_um,
-                    # then force drives it toward min
-                    move_to_position(motor, EXPERIMENT_MAX_POS_UM)
-                    time.sleep(0.3)
+                motor.enable_stream()
+                time.sleep(0.3)
 
                 print(f"  Collecting data (force={force_mN} mN)...")
                 trial_data = run_single_trial(motor, force_mN)
