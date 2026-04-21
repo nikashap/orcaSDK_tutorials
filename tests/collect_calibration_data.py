@@ -455,11 +455,11 @@ def run_rampdown_trial(motor, startup_force_mN, target_force_mN,
             break
 
         if switched and prev_pos is not None:
-            if abs(pos_um - prev_pos) < 5:
+            if abs(pos_um - prev_pos) < 20:
                 consecutive_slow += 1
             else:
                 consecutive_slow = 0
-            if consecutive_slow > 50:
+            if consecutive_slow > 10:
                 print(f"    Shaft stopped after switch (position ~{pos_um} um)")
                 break
 
