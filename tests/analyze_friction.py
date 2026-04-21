@@ -86,7 +86,13 @@ def load_master_data(filepath):
     n_trials = int(data["n_trials"])
     boundaries = data["trial_boundaries"]
 
-    has_per_sample_force_cmd = "force_commanded_mN" in data
+    # Determine procedure type: explicit tag in new data, fallback for old data
+    if "procedure_type" in data:
+        procedure_type = str(data["procedure_type"])
+    else:
+        procedure_type = "constant"
+
+    is_rampdown = (procedure_type == "rampdown")
 
     t_stream_all = data["t_stream"]
     position_um_all = data["position_um"]
@@ -94,24 +100,37 @@ def load_master_data(filepath):
     t_accel_all = data["t_accel"]
     accel_mmpss_all = data["accel_mmpss"]
 
-    if has_per_sample_force_cmd:
+    if is_rampdown:
         force_cmd_all = data["force_commanded_mN"]
         trial_labels = data["trial_target_force_mN"]
+        trial_switch_indices = data["trial_switch_index"]
     else:
+        force_cmd_all = (data["force_commanded_mN"] if "force_commanded_mN" in data
+                         else None)
         force_cmd_per_trial = data["trial_force_commanded_mN"]
 
     trials = {}
     for i in range(n_trials):
         lo, hi = boundaries[i], boundaries[i + 1]
-        t_stream = t_stream_all[lo:hi]
-        t0 = t_stream[0] if len(t_stream) > 0 else 0.0
 
-        if has_per_sample_force_cmd:
+        if is_rampdown:
+            switch_idx = int(trial_switch_indices[i])
+            if switch_idx < 0:
+                continue
+            lo = lo + switch_idx
             force_cmd = force_cmd_all[lo:hi].astype(np.float64)
             label = int(trial_labels[i])
+        elif force_cmd_all is not None:
+            force_cmd = force_cmd_all[lo:hi].astype(np.float64)
+            label = int(force_cmd_per_trial[i])
         else:
             force_cmd = np.full(hi - lo, force_cmd_per_trial[i], dtype=np.float64)
             label = int(force_cmd_per_trial[i])
+
+        t_stream = t_stream_all[lo:hi]
+        if len(t_stream) == 0:
+            continue
+        t0 = t_stream[0]
 
         trials[i + 1] = {
             "trial_num": i + 1,
@@ -124,7 +143,7 @@ def load_master_data(filepath):
             "accel_mmpss": accel_mmpss_all[lo:hi].astype(np.float64),
         }
 
-    if has_per_sample_force_cmd:
+    if is_rampdown:
         force_levels = sorted(set(int(trial_labels[i]) for i in range(n_trials)))
     else:
         force_levels = data["force_levels_mN"].tolist()

@@ -356,6 +356,7 @@ def collect_data(motor,
     np.savez(
         filepath,
         # Metadata
+        procedure_type="constant",
         mass_shaft_kg=PARAMS["mass_shaft_kg"],
         motor_min_um=MOTOR_MIN_UM,
         motor_max_um=MOTOR_MAX_UM,
@@ -610,6 +611,7 @@ def collect_rampdown_data(motor,
     np.savez(
         filepath,
         # Metadata
+        procedure_type="rampdown",
         mass_shaft_kg=PARAMS["mass_shaft_kg"],
         motor_min_um=MOTOR_MIN_UM,
         motor_max_um=MOTOR_MAX_UM,
