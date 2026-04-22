@@ -4,7 +4,7 @@ analyze_friction.py
 
 Analyze calibration data to produce:
   1) Several graphs that describe how position, velocity, and force command affect friction
-  3) Augmented data file with friction coefficient estimates appended
+  2) Augmented data file with friction coefficient estimates appended
 
 All parameters are read from calibration_params.yaml.
 
@@ -265,6 +265,8 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
         t_trimmed = t[:n - shift]
         pos_trimmed = pos_um[:n - shift]
         vel_trimmed = velocity_mm_s[:n - shift]
+        pos_aligned = pos_um[shift:]
+        vel_aligned = velocity_mm_s[shift:]
         force_cmd_trimmed = force_commanded[:n - shift]
         force_sensed_unshifted = sensed_force[:n - shift]
     elif shift < 0:
@@ -274,6 +276,8 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
         t_trimmed = t[abs_shift:]
         pos_trimmed = pos_um[abs_shift:]
         vel_trimmed = velocity_mm_s[abs_shift:]
+        pos_aligned = pos_um[:n - abs_shift]
+        vel_aligned = velocity_mm_s[:n - abs_shift]
         force_cmd_trimmed = force_commanded[abs_shift:]
         force_sensed_unshifted = sensed_force[abs_shift:]
     else:
@@ -282,6 +286,8 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
         t_trimmed = t
         pos_trimmed = pos_um
         vel_trimmed = velocity_mm_s
+        pos_aligned = pos_um
+        vel_aligned = velocity_mm_s
         force_cmd_trimmed = force_commanded
         force_sensed_unshifted = sensed_force
 
@@ -297,11 +303,13 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
         "force_commanded_mN": force_cmd_trimmed,
         "t_stream_s": t_trimmed,
         "position_um": pos_trimmed,
+        "position_um_aligned": pos_aligned,
         "force_mN": force_aligned,
         "force_sensed_unshifted_mN": force_sensed_unshifted,
         "accel_mmpss": accel_aligned,
         "accel_interp_mmpss": accel_aligned,
         "velocity_mm_s": vel_trimmed,
+        "velocity_mm_s_aligned": vel_aligned,
         "f_friction_mN": f_friction_mN,
         "mu_d": mu_d,
     }
@@ -521,6 +529,9 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     # Concatenate trimmed+aligned per-sample arrays from friction_trials
     t_stream_all = np.concatenate([r["t_stream_s"] for r in friction_trials])
     position_all = np.concatenate([r["position_um"] for r in friction_trials])
+    position_aligned_all = np.concatenate(
+        [r["position_um_aligned"] for r in friction_trials]
+    )
     force_sensed_all = np.concatenate([r["force_mN"] for r in friction_trials])
     force_sensed_unshifted_all = np.concatenate(
         [r["force_sensed_unshifted_mN"] for r in friction_trials]
@@ -530,6 +541,9 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     )
     accel_all = np.concatenate([r["accel_mmpss"] for r in friction_trials])
     velocity_all = np.concatenate([r["velocity_mm_s"] for r in friction_trials])
+    velocity_aligned_all = np.concatenate(
+        [r["velocity_mm_s_aligned"] for r in friction_trials]
+    )
     f_friction_all = np.concatenate([r["f_friction_mN"] for r in friction_trials])
     mu_d_all = np.concatenate([r["mu_d"] for r in friction_trials])
 
@@ -558,11 +572,13 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     # "unshifted" = at the original stream timepoint (same frame as position).
     out["t_stream_s"] = t_stream_all
     out["position_um_unshifted"] = position_all
+    out["position_um_aligned"] = position_aligned_all
     out["force_mN_aligned"] = force_sensed_all
     out["force_sensed_unshifted_mN"] = force_sensed_unshifted_all
     out["force_commanded_mN"] = force_commanded_all
     out["accel_mmpss_aligned"] = accel_all
     out["velocity_mm_s_unshifted"] = velocity_all
+    out["velocity_mm_s_aligned"] = velocity_aligned_all
     out["f_friction_mN"] = f_friction_all
     out["mu_d"] = mu_d_all
 

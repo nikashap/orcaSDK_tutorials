@@ -2,7 +2,7 @@
 friction_model.py
 
 PyTorch dataset and model for predicting mu_d from
-(position_um, velocity_mm_s, force_commanded_mN).
+(position_um_aligned, velocity_mm_s_aligned, force_mN_aligned).
 
 Used by train_model.py.  Can also be imported at inference time
 in the real-time control loop.
@@ -23,7 +23,7 @@ class FrictionDataset(Dataset):
     Target (mu_d) is NOT normalized — the network predicts raw mu_d.
     """
 
-    INPUT_KEYS = ["position_um_unshifted", "velocity_mm_s_unshifted",
+    INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned",
                    "force_mN_aligned"]
 
     def __init__(self, npz_path, split="train"):

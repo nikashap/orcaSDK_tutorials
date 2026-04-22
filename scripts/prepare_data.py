@@ -78,13 +78,13 @@ def load_and_merge(data_dirs, t_ignore_s):
     """Load stribeck_data.npz from each date, apply t_ignore filter,
     and merge into flat arrays.
 
-    Handles both the current key names (e.g. position_um_unshifted,
-    velocity_mm_s_unshifted) and legacy names (position_um, velocity_mm_s).
+    Handles both the current key names (e.g. force_mN_aligned) and
+    legacy names (force_mN) for force data.
 
     Returns
     -------
     samples : dict of 1-D arrays, all length N_total
-        Keys: position_um_unshifted, velocity_mm_s_unshifted,
+        Keys: position_um_aligned, velocity_mm_s_aligned,
               force_mN_aligned, mu_d
     trial_ids : 1-D int array, length N_total
     n_trials_total : int
@@ -103,8 +103,8 @@ def load_and_merge(data_dirs, t_ignore_s):
         n_trials = int(d["n_trials"])
         boundaries = d["trial_boundaries"]
         t_stream = d["t_stream_s"]
-        position = _get_npz_key(d, "position_um_unshifted", "position_um")
-        velocity = _get_npz_key(d, "velocity_mm_s_unshifted", "velocity_mm_s")
+        position = d["position_um_aligned"]
+        velocity = d["velocity_mm_s_aligned"]
         force_aligned = _get_npz_key(d, "force_mN_aligned", "force_mN")
         mu_d = d["mu_d"]
 
@@ -132,8 +132,8 @@ def load_and_merge(data_dirs, t_ignore_s):
         print(f"  {npz_path}: {n_trials} trials loaded")
 
     samples = {
-        "position_um_unshifted": np.concatenate(all_position),
-        "velocity_mm_s_unshifted": np.concatenate(all_velocity),
+        "position_um_aligned": np.concatenate(all_position),
+        "velocity_mm_s_aligned": np.concatenate(all_velocity),
         "force_mN_aligned": np.concatenate(all_force_aligned),
         "mu_d": np.concatenate(all_mu_d),
     }
@@ -169,7 +169,7 @@ def split_by_trial(samples, trial_ids, n_trials, train_ratio, val_ratio,
 
 # ── Normalization ────────────────────────────────────────────────────────────
 
-INPUT_KEYS = ["position_um_unshifted", "velocity_mm_s_unshifted", "force_mN_aligned"]
+INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_aligned"]
 EXTRA_FEATURE_KEYS = []
 TARGET_KEY = "mu_d"
 
@@ -193,13 +193,13 @@ def augment_velocity_sign_flip(samples):
     """Create paired data points with velocity sign flipped.
 
     For each original sample, a mirror sample is created where
-    velocity_mm_s_unshifted has its sign negated. All other features and the
+    velocity_mm_s_aligned has its sign negated. All other features and the
     target (mu_d) are kept identical. Returns a new samples dict with double
     the original size.
     """
     flipped = {}
     for key, arr in samples.items():
-        if key == "velocity_mm_s_unshifted":
+        if key == "velocity_mm_s_aligned":
             flipped[key] = -arr
         else:
             flipped[key] = arr.copy()
@@ -281,18 +281,18 @@ def main():
     np.savez(
         out_path,
         # Train
-        train_position_um_unshifted=train["position_um_unshifted"],
-        train_velocity_mm_s_unshifted=train["velocity_mm_s_unshifted"],
+        train_position_um_aligned=train["position_um_aligned"],
+        train_velocity_mm_s_aligned=train["velocity_mm_s_aligned"],
         train_force_mN_aligned=train["force_mN_aligned"],
         train_mu_d=train["mu_d"],
         # Validation
-        val_position_um_unshifted=val["position_um_unshifted"],
-        val_velocity_mm_s_unshifted=val["velocity_mm_s_unshifted"],
+        val_position_um_aligned=val["position_um_aligned"],
+        val_velocity_mm_s_aligned=val["velocity_mm_s_aligned"],
         val_force_mN_aligned=val["force_mN_aligned"],
         val_mu_d=val["mu_d"],
         # Test
-        test_position_um_unshifted=test["position_um_unshifted"],
-        test_velocity_mm_s_unshifted=test["velocity_mm_s_unshifted"],
+        test_position_um_aligned=test["position_um_aligned"],
+        test_velocity_mm_s_aligned=test["velocity_mm_s_aligned"],
         test_force_mN_aligned=test["force_mN_aligned"],
         test_mu_d=test["mu_d"],
         # Normalization
