@@ -15,8 +15,8 @@ motor_min_um: 1300                   # minimum shaft position (micrometers)
 motor_max_um: 670000                # maximum shaft position (micrometers)
 
 # Experiment position window — calibration data is collected within this range
-experiment_min_pos_um: 270000          # start of usable range (micrometers)
-experiment_max_pos_um: 520000       # end of usable range (micrometers)
+experiment_min_pos_um: 20000          # start of usable range (micrometers)
+experiment_max_pos_um: 70000       # end of usable range (micrometers)
 
 # ---------------------------------------------------------------------------
 # Communication
@@ -35,53 +35,64 @@ auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
 # ---------------------------------------------------------------------------
-# force_levels_mN: [
-#                  -7500,
-#                  -8000,
-#                  -8500,
-#                  -9000,
-#                  -9500,
-#                  -10000,
-#                  -10500,
-#                  -11000,
-#                  -11500,
-#                  -12000,
-#                  -12500,
-#                  -13000,
-#                  -13500,
-#                  -14000,
-#                  -14500,
-#                  -15000,
-#                 ]
 force_levels_mN: [
-                 7000,
-                 7500,
-                 8000,
-                 8500,
-                 9000,
-                 9500,
-                 10000,
-                 10500,
-                 11000,
-                 11500,
-                 12000,
-                 12500,
-                 13000,
-                 13500,
-                 14000,
-                 14500,
-                 15000,
-                 15500,
-                 16000,
-                 16500,
-                 17000,
-                 17500,
-                 18000,
-                 18500,
-                 19000,
-                 19500,
-                 20000
-                 ]
+                 -7000,
+                 -7500,
+                 -8000,
+                 -8500,
+                 -9000,
+                 -9500,
+                 -10000,
+                 -10500,
+                 -11000,
+                 -11500,
+                 -12000,
+                 -12500,
+                 -13000,
+                 -13500,
+                 -14000,
+                 -14500,
+                 -15000,
+                 -15500,
+                 -16000,
+                 -16500,
+                 -17000,
+                 -17500,
+                 -18000,
+                 -18500,
+                 -19000,
+                 -19500,
+                 -20000
+                ]
+# force_levels_mN: [
+#                  7000,
+#                  7500,
+#                  8000,
+#                  8500,
+#                  9000,
+#                  9500,
+#                  10000,
+#                  10500,
+#                  11000,
+#                  11500,
+#                  12000,
+#                  12500,
+#                  13000,
+#                  13500,
+#                  14000,
+#                  14500,
+#                  15000,
+#                  15500,
+#                  16000,
+#                  16500,
+#                  17000,
+#                  17500,
+#                  18000,
+#                  18500,
+#                  19000,
+#                  19500,
+#                  20000
+#                  ]
 
 iterations_per_force: 5
 
@@ -103,21 +114,21 @@ friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 # "Running start" protocol: accelerate the shaft with a high startup force,
 # then switch to a lower target force mid-travel to capture friction during
 # deceleration / low-force coasting — regimes unreachable from rest.
-rampdown_startup_force_mN: 15000     # high force to get shaft moving
+rampdown_startup_force_mN: -15000     # high force to get shaft moving
 rampdown_target_forces_mN: [         # forces to step down to (including 0 and negative)
     0,
-    500,
-    1000,
-    1500,
-    2000,
-    2500,
-    3000,
-    3500,
-    4000,
-    4500,
-    5000,
-    5500,
-    6000,
+    -500,
+    -1000,
+    -1500,
+    -2000,
+    -2500,
+    -3000,
+    -3500,
+    -4000,
+    -4500,
+    -5000,
+    -5500,
+    -6000,
 ]
 rampdown_switch_positions_um: [       # positions at which the force switches to the target
     20000,
@@ -128,12 +139,12 @@ rampdown_switch_positions_um: [       # positions at which the force switches to
 
 ]
 rampdown_starting_positions_um: [     # starting positions for the shaft before startup force
-    1300,
     20000,
     120000,
     270000,
     370000,
     470000,
+    520000,
 ]
 rampdown_iterations_per_combo: 3      # trials per (target_force, switch_position, starting_position) combo
 
