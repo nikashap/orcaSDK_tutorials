@@ -177,6 +177,12 @@ rw_window: 3                        # number of finite-difference samples to ave
 # Analysis: friction estimation
 # ---------------------------------------------------------------------------
 t_ignore_s: 0.015                   # ignore first N seconds (static breakaway transient)
+
+# ---------------------------------------------------------------------------
+# Analysis: training data filters (static regime exclusion)
+# ---------------------------------------------------------------------------
+velocity_cutoff_mm_s: 5.0           # exclude samples with |velocity| <= this (mm/s)
+rampdown_min_travel_um: 2540        # exclude rampdown trials with < this travel after switch (µm)
 static_friction_low_mN: 4750.0      # lower bound of estimated static friction
 static_friction_high_mN: 5000.0     # upper bound of estimated static friction
 

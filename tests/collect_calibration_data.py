@@ -449,9 +449,9 @@ def run_rampdown_trial(motor, startup_force_mN, target_force_mN,
         accel_list.append(accel_mmpss)
         force_cmd_list.append(current_cmd)
 
-        if moving_positive and pos_um >= EXPERIMENT_MAX_POS_UM:
+        if moving_positive and pos_um >= MOTOR_MAX_UM:
             break
-        if not moving_positive and pos_um <= EXPERIMENT_MIN_POS_UM:
+        if not moving_positive and pos_um <= MOTOR_MIN_UM:
             break
 
         if switched and prev_pos is not None:

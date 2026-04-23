@@ -65,6 +65,8 @@ F_STATIC_LOW_MN = PARAMS["static_friction_low_mN"]
 F_STATIC_HIGH_MN = PARAMS["static_friction_high_mN"]
 STREAM_FORCE_SHIFT = PARAMS.get("stream_force_shift", 0)
 USB_CHIP = PARAMS.get("usb_chip", "unknown")
+VELOCITY_CUTOFF = PARAMS.get("velocity_cutoff_mm_s", 5.0)
+RAMPDOWN_MIN_TRAVEL_UM = PARAMS.get("rampdown_min_travel_um", 2540)
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +130,13 @@ def load_master_data(filepath):
             label = int(force_cmd_per_trial[i])
 
         t_stream = t_stream_all[lo:hi]
-        if len(t_stream) == 0:
+        if len(t_stream) < 2:
             continue
         t0 = t_stream[0]
 
         trials[i + 1] = {
             "trial_num": i + 1,
+            "procedure_type": procedure_type,
             "force_commanded_mN": force_cmd,
             "force_label_mN": label,
             "t_stream_s": t_stream - t0,
@@ -299,6 +302,7 @@ def compute_friction_for_trial(trial, velocity_estimator="SG",
 
     return {
         "trial_num": trial["trial_num"],
+        "procedure_type": trial["procedure_type"],
         "force_label_mN": trial["force_label_mN"],
         "force_commanded_mN": force_cmd_trimmed,
         "t_stream_s": t_trimmed,
@@ -514,7 +518,9 @@ def plot_stribeck_3d(friction_trials, force_levels):
 # Save augmented data
 # ---------------------------------------------------------------------------
 
-def save_augmented_data(experiment_dir, friction_trials, metadata):
+def save_augmented_data(experiment_dir, friction_trials, metadata,
+                        velocity_cutoff=VELOCITY_CUTOFF,
+                        rampdown_min_travel_um=RAMPDOWN_MIN_TRAVEL_UM):
     """
     Save a new .npz with all per-sample arrays aligned after shift trimming.
 
@@ -522,36 +528,79 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     All per-sample arrays here come from the trimmed friction_trials dicts, so
     every array is guaranteed to be the same length and sample-aligned.
 
+    Filters applied before saving (for MLP training quality):
+      - Rampdown trials where total post-switch shaft travel < rampdown_min_travel_um
+        are excluded entirely (stiction-dominated trials with noisy labels).
+      - Samples where |velocity_aligned| <= velocity_cutoff are excluded
+        (static regime — noisy friction estimates near zero velocity).
+
     Includes per-sample force_commanded_mN and force_sensed_unshifted_mN
     (sensed force at the same timepoint as position/velocity, before shift
     alignment — useful as a potential model input).
     """
-    # Concatenate trimmed+aligned per-sample arrays from friction_trials
-    t_stream_all = np.concatenate([r["t_stream_s"] for r in friction_trials])
-    position_all = np.concatenate([r["position_um"] for r in friction_trials])
+    # --- Filter trials and samples for training data quality ---
+    filtered_trials = []
+    n_rampdown_dropped = 0
+    n_samples_before = 0
+    n_samples_after = 0
+
+    for r in friction_trials:
+        n_samples_before += len(r["velocity_mm_s_aligned"])
+
+        if r["procedure_type"] == "rampdown":
+            pos = r["position_um_aligned"]
+            travel_um = abs(pos[-1] - pos[0]) if len(pos) > 0 else 0
+            if travel_um < rampdown_min_travel_um:
+                n_rampdown_dropped += 1
+                continue
+
+        vel = r["velocity_mm_s_aligned"]
+        mask = np.abs(vel) > velocity_cutoff
+
+        if np.sum(mask) == 0:
+            continue
+
+        filtered_trials.append({
+            key: (val[mask] if isinstance(val, np.ndarray) and len(val) == len(mask)
+                  else val)
+            for key, val in r.items()
+        })
+        n_samples_after += np.sum(mask)
+
+    print(f"  Filtering for training data:")
+    print(f"    Velocity cutoff: |v| > {velocity_cutoff} mm/s")
+    print(f"    Rampdown min travel: {rampdown_min_travel_um} um")
+    print(f"    Rampdown trials dropped (insufficient travel): {n_rampdown_dropped}")
+    print(f"    Trials kept: {len(filtered_trials)} / {len(friction_trials)}")
+    print(f"    Samples kept: {n_samples_after} / {n_samples_before} "
+          f"({100*n_samples_after/n_samples_before:.1f}%)" if n_samples_before > 0 else "")
+
+    # Concatenate filtered per-sample arrays
+    t_stream_all = np.concatenate([r["t_stream_s"] for r in filtered_trials])
+    position_all = np.concatenate([r["position_um"] for r in filtered_trials])
     position_aligned_all = np.concatenate(
-        [r["position_um_aligned"] for r in friction_trials]
+        [r["position_um_aligned"] for r in filtered_trials]
     )
-    force_sensed_all = np.concatenate([r["force_mN"] for r in friction_trials])
+    force_sensed_all = np.concatenate([r["force_mN"] for r in filtered_trials])
     force_sensed_unshifted_all = np.concatenate(
-        [r["force_sensed_unshifted_mN"] for r in friction_trials]
+        [r["force_sensed_unshifted_mN"] for r in filtered_trials]
     )
     force_commanded_all = np.concatenate(
-        [r["force_commanded_mN"] for r in friction_trials]
+        [r["force_commanded_mN"] for r in filtered_trials]
     )
-    accel_all = np.concatenate([r["accel_mmpss"] for r in friction_trials])
-    velocity_all = np.concatenate([r["velocity_mm_s"] for r in friction_trials])
+    accel_all = np.concatenate([r["accel_mmpss"] for r in filtered_trials])
+    velocity_all = np.concatenate([r["velocity_mm_s"] for r in filtered_trials])
     velocity_aligned_all = np.concatenate(
-        [r["velocity_mm_s_aligned"] for r in friction_trials]
+        [r["velocity_mm_s_aligned"] for r in filtered_trials]
     )
-    f_friction_all = np.concatenate([r["f_friction_mN"] for r in friction_trials])
-    mu_d_all = np.concatenate([r["mu_d"] for r in friction_trials])
+    f_friction_all = np.concatenate([r["f_friction_mN"] for r in filtered_trials])
+    mu_d_all = np.concatenate([r["mu_d"] for r in filtered_trials])
 
-    # Recompute trial boundaries for trimmed data
-    trial_n_samples = np.array([len(r["mu_d"]) for r in friction_trials],
+    # Recompute trial boundaries for filtered data
+    trial_n_samples = np.array([len(r["mu_d"]) for r in filtered_trials],
                                dtype=np.int32)
     trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples)])
-    trial_force_labels = np.array([r["force_label_mN"] for r in friction_trials],
+    trial_force_labels = np.array([r["force_label_mN"] for r in filtered_trials],
                                   dtype=np.int32)
 
     out = {}
@@ -561,7 +610,7 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     out["motor_min_um"] = metadata["motor_min_um"]
     out["motor_max_um"] = metadata["motor_max_um"]
     out["force_levels_mN"] = np.array(metadata["force_levels_mN"], dtype=np.int32)
-    out["n_trials"] = len(friction_trials)
+    out["n_trials"] = len(filtered_trials)
 
     out["trial_n_samples"] = trial_n_samples
     out["trial_boundaries"] = trial_boundaries
@@ -588,6 +637,8 @@ def save_augmented_data(experiment_dir, friction_trials, metadata):
     out["savgol_order"] = SAVGOL_ORDER
     out["rw_window"] = RW_WINDOW
     out["stream_force_shift"] = STREAM_FORCE_SHIFT
+    out["velocity_cutoff_mm_s"] = velocity_cutoff
+    out["rampdown_min_travel_um"] = rampdown_min_travel_um
 
     out_path = os.path.join(experiment_dir, "stribeck_data.npz")
     np.savez(out_path, **out)
