@@ -410,3 +410,9 @@ FodyWeavers.xsd
 
 # ORCA Manuals
 Manuals/
+
+# Training Data
+data/
+
+# Models
+models/
