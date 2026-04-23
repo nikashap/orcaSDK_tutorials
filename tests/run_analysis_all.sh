@@ -5,7 +5,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$SCRIPT_DIR/../data"
-CUTOFF="26_04_14-14_49_13"
+CUTOFF="26_04_16-18_20_29"
 
 for dir in "$DATA_DIR"/*/; do
     date_name="$(basename "$dir")"
