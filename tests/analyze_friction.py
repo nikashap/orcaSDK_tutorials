@@ -622,7 +622,8 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
     out["t_stream_s"] = t_stream_all
     out["position_um_unshifted"] = position_all
     out["position_um_aligned"] = position_aligned_all
-    out["force_mN_aligned"] = force_sensed_all
+    out["force_mN_sensed_aligned"] = force_sensed_all
+    out["force_mN_realized_aligned"] = M_SHAFT_KG * accel_all
     out["force_sensed_unshifted_mN"] = force_sensed_unshifted_all
     out["force_commanded_mN"] = force_commanded_all
     out["accel_mmpss_aligned"] = accel_all

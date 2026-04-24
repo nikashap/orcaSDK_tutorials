@@ -82,21 +82,18 @@ def load_and_merge(data_dirs, t_ignore_s):
     """Load stribeck_data.npz from each date, apply t_ignore filter,
     and merge into flat arrays.
 
-    Handles both the current key names (e.g. force_mN_aligned) and
-    legacy names (force_mN) for force data.
-
     Returns
     -------
     samples : dict of 1-D arrays, all length N_total
         Keys: position_um_aligned, velocity_mm_s_aligned,
-              force_mN_aligned, mu_d
+              force_mN_realized_aligned, force_mN_sensed_aligned
     trial_ids : 1-D int array, length N_total
     n_trials_total : int
     """
     all_position = []
     all_velocity = []
-    all_force_aligned = []
-    all_mu_d = []
+    all_force_realized = []
+    all_force_sensed = []
     all_trial_id = []
     global_trial = 0
 
@@ -109,8 +106,13 @@ def load_and_merge(data_dirs, t_ignore_s):
         t_stream = d["t_stream_s"]
         position = d["position_um_aligned"]
         velocity = d["velocity_mm_s_aligned"]
-        force_aligned = _get_npz_key(d, "force_mN_aligned", "force_mN")
-        mu_d = d["mu_d"]
+        force_sensed = _get_npz_key(d, "force_mN_sensed_aligned",
+                                    "force_mN_aligned")
+        if "force_mN_realized_aligned" in d:
+            force_realized = d["force_mN_realized_aligned"]
+        else:
+            mass = float(d["mass_shaft_kg"])
+            force_realized = mass * d["accel_mmpss_aligned"]
 
         for i in range(n_trials):
             lo, hi = int(boundaries[i]), int(boundaries[i + 1])
@@ -126,8 +128,8 @@ def load_and_merge(data_dirs, t_ignore_s):
 
             all_position.append(position[lo:hi][mask])
             all_velocity.append(velocity[lo:hi][mask])
-            all_force_aligned.append(force_aligned[lo:hi][mask])
-            all_mu_d.append(mu_d[lo:hi][mask])
+            all_force_realized.append(force_realized[lo:hi][mask])
+            all_force_sensed.append(force_sensed[lo:hi][mask])
             all_trial_id.append(
                 np.full(n_keep, global_trial, dtype=np.int32)
             )
@@ -138,8 +140,8 @@ def load_and_merge(data_dirs, t_ignore_s):
     samples = {
         "position_um_aligned": np.concatenate(all_position),
         "velocity_mm_s_aligned": np.concatenate(all_velocity),
-        "force_mN_aligned": np.concatenate(all_force_aligned),
-        "mu_d": np.concatenate(all_mu_d),
+        "force_mN_realized_aligned": np.concatenate(all_force_realized),
+        "force_mN_sensed_aligned": np.concatenate(all_force_sensed),
     }
     trial_ids = np.concatenate(all_trial_id)
 
@@ -173,9 +175,9 @@ def split_by_trial(samples, trial_ids, n_trials, train_ratio, val_ratio,
 
 # ── Normalization ────────────────────────────────────────────────────────────
 
-INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_aligned"]
+INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_realized_aligned"]
 EXTRA_FEATURE_KEYS = []
-TARGET_KEY = "mu_d"
+TARGET_KEY = "force_mN_sensed_aligned"
 
 
 def compute_norm_stats(train_samples):
@@ -200,11 +202,11 @@ def compute_coverage_report(train, val, test, n_bins=20):
     n_bins^3 grid and reports what fraction of cells contain data.
     """
     feature_keys = ["position_um_aligned", "velocity_mm_s_aligned",
-                    "force_mN_aligned"]
+                    "force_mN_realized_aligned"]
     feature_labels = {
         "position_um_aligned": {"unit": "µm", "short": "position"},
         "velocity_mm_s_aligned": {"unit": "mm/s", "short": "velocity"},
-        "force_mN_aligned": {"unit": "mN", "short": "force"},
+        "force_mN_realized_aligned": {"unit": "mN", "short": "force_realized"},
     }
 
     splits = {"train": train, "val": val, "test": test}
@@ -236,7 +238,7 @@ def compute_coverage_report(train, val, test, n_bins=20):
 
     pos_all = all_combined["position_um_aligned"]
     vel_all = all_combined["velocity_mm_s_aligned"]
-    frc_all = all_combined["force_mN_aligned"]
+    frc_all = all_combined["force_mN_realized_aligned"]
 
     pos_edges = np.linspace(pos_all.min(), pos_all.max(), n_bins + 1)
     vel_edges = np.linspace(vel_all.min(), vel_all.max(), n_bins + 1)
@@ -260,7 +262,7 @@ def compute_coverage_report(train, val, test, n_bins=20):
         hist_s, _ = np.histogramdd(
             np.column_stack([sdata["position_um_aligned"],
                              sdata["velocity_mm_s_aligned"],
-                             sdata["force_mN_aligned"]]),
+                             sdata["force_mN_realized_aligned"]]),
             bins=[pos_edges, vel_edges, frc_edges],
         )
         occ = int(np.sum(hist_s > 0))
@@ -286,10 +288,10 @@ def plot_coverage(train, val, test, output_dir):
     pairs = [
         ("position_um_aligned", "velocity_mm_s_aligned",
          "Position (µm)", "Velocity (mm/s)"),
-        ("position_um_aligned", "force_mN_aligned",
-         "Position (µm)", "Force (mN)"),
-        ("velocity_mm_s_aligned", "force_mN_aligned",
-         "Velocity (mm/s)", "Force (mN)"),
+        ("position_um_aligned", "force_mN_realized_aligned",
+         "Position (µm)", "Force realized (mN)"),
+        ("velocity_mm_s_aligned", "force_mN_realized_aligned",
+         "Velocity (mm/s)", "Force realized (mN)"),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -320,19 +322,19 @@ def plot_coverage(train, val, test, output_dir):
     step_vt = max(1, len(val["position_um_aligned"]) // 5000)
     ax3.scatter(train["position_um_aligned"][::step_tr],
                 train["velocity_mm_s_aligned"][::step_tr],
-                train["force_mN_aligned"][::step_tr],
+                train["force_mN_realized_aligned"][::step_tr],
                 s=2, alpha=0.1, c="tab:blue", label="train")
     ax3.scatter(val["position_um_aligned"][::step_vt],
                 val["velocity_mm_s_aligned"][::step_vt],
-                val["force_mN_aligned"][::step_vt],
+                val["force_mN_realized_aligned"][::step_vt],
                 s=2, alpha=0.2, c="tab:orange", label="val")
     ax3.scatter(test["position_um_aligned"][::step_vt],
                 test["velocity_mm_s_aligned"][::step_vt],
-                test["force_mN_aligned"][::step_vt],
+                test["force_mN_realized_aligned"][::step_vt],
                 s=2, alpha=0.2, c="tab:green", label="test")
     ax3.set_xlabel("Position (µm)")
     ax3.set_ylabel("Velocity (mm/s)")
-    ax3.set_zlabel("Force (mN)")
+    ax3.set_zlabel("Force realized (mN)")
     ax3.set_title("Input space coverage — 3D")
     ax3.legend(fontsize=8, markerscale=4)
     scatter_path = os.path.join(output_dir, "input_coverage_3d.png")
@@ -379,7 +381,7 @@ def main():
     # Load and merge
     print(f"\nLoading data from {len(data_dates)} date(s)...")
     samples, trial_ids, n_trials = load_and_merge(data_dirs, t_ignore_s)
-    n_total = len(samples["mu_d"])
+    n_total = len(samples["force_mN_sensed_aligned"])
     print(f"Total: {n_trials} trials, {n_total} samples "
           f"(after t_ignore={t_ignore_s}s filter)")
 
@@ -389,9 +391,9 @@ def main():
     train, val, test = split_by_trial(
         samples, trial_ids, n_trials, train_ratio, val_ratio, test_ratio, seed
     )
-    print(f"  Train: {len(train['mu_d'])} samples")
-    print(f"  Val:   {len(val['mu_d'])} samples")
-    print(f"  Test:  {len(test['mu_d'])} samples")
+    print(f"  Train: {len(train['force_mN_sensed_aligned'])} samples")
+    print(f"  Val:   {len(val['force_mN_sensed_aligned'])} samples")
+    print(f"  Test:  {len(test['force_mN_sensed_aligned'])} samples")
 
     # Normalization stats (from training set only)
     norm_stats = compute_norm_stats(train)
@@ -409,18 +411,18 @@ def main():
         # Train
         train_position_um_aligned=train["position_um_aligned"],
         train_velocity_mm_s_aligned=train["velocity_mm_s_aligned"],
-        train_force_mN_aligned=train["force_mN_aligned"],
-        train_mu_d=train["mu_d"],
+        train_force_mN_realized_aligned=train["force_mN_realized_aligned"],
+        train_force_mN_sensed_aligned=train["force_mN_sensed_aligned"],
         # Validation
         val_position_um_aligned=val["position_um_aligned"],
         val_velocity_mm_s_aligned=val["velocity_mm_s_aligned"],
-        val_force_mN_aligned=val["force_mN_aligned"],
-        val_mu_d=val["mu_d"],
+        val_force_mN_realized_aligned=val["force_mN_realized_aligned"],
+        val_force_mN_sensed_aligned=val["force_mN_sensed_aligned"],
         # Test
         test_position_um_aligned=test["position_um_aligned"],
         test_velocity_mm_s_aligned=test["velocity_mm_s_aligned"],
-        test_force_mN_aligned=test["force_mN_aligned"],
-        test_mu_d=test["mu_d"],
+        test_force_mN_realized_aligned=test["force_mN_realized_aligned"],
+        test_force_mN_sensed_aligned=test["force_mN_sensed_aligned"],
         # Normalization
         **norm_stats,
         # Config snapshot

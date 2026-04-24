@@ -28,8 +28,8 @@ seed: 42
 # ---------------------------------------------------------------------------
 # Model architecture
 # ---------------------------------------------------------------------------
-# Input features: position_um_aligned, velocity_mm_s_aligned, force_mN_aligned (3 total)
-# Output: mu_d (1 scalar)
+# Input features: position_um_aligned, velocity_mm_s_aligned, force_mN_realized_aligned (3 total)
+# Output: force_mN_sensed_aligned (1 scalar)
 hidden_dims: [32, 32]        # list of hidden layer widths
 activation: "relu"           # "relu", "tanh", or "leaky_relu"
 dropout: 0.0                 # dropout probability (0 = no dropout)

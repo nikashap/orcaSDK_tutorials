@@ -1,8 +1,8 @@
 """
 friction_model.py
 
-PyTorch dataset and model for predicting mu_d from
-(position_um_aligned, velocity_mm_s_aligned, force_mN_aligned).
+PyTorch dataset and model for predicting force_mN_sensed_aligned from
+(position_um_aligned, velocity_mm_s_aligned, force_mN_realized_aligned).
 
 Used by train_model.py.  Can also be imported at inference time
 in the real-time control loop.
@@ -20,11 +20,12 @@ class FrictionDataset(Dataset):
     """Loads a split (train/val/test) from the prepared .npz file.
 
     Inputs are z-score normalized using the provided mean/std stats.
-    Target (mu_d) is NOT normalized — the network predicts raw mu_d.
+    Target (force_mN_sensed_aligned) is NOT normalized.
     """
 
     INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned",
-                   "force_mN_aligned"]
+                   "force_mN_realized_aligned"]
+    TARGET_KEY = "force_mN_sensed_aligned"
 
     def __init__(self, npz_path, split="train"):
         """
@@ -47,7 +48,9 @@ class FrictionDataset(Dataset):
             raw_inputs.append((arr - mean) / std)
 
         self.X = torch.from_numpy(np.column_stack(raw_inputs))
-        self.y = torch.from_numpy(d[f"{split}_mu_d"].astype(np.float32))
+        self.y = torch.from_numpy(
+            d[f"{split}_{self.TARGET_KEY}"].astype(np.float32)
+        )
 
         self.norm_stats = {}
         for key in self.INPUT_KEYS:
@@ -55,6 +58,10 @@ class FrictionDataset(Dataset):
                 "mean": float(d[f"{key}_mean"]),
                 "std": float(d[f"{key}_std"]),
             }
+        self.norm_stats[self.TARGET_KEY] = {
+            "mean": float(d[f"{self.TARGET_KEY}_mean"]),
+            "std": float(d[f"{self.TARGET_KEY}_std"]),
+        }
 
     def __len__(self):
         return len(self.y)
@@ -73,7 +80,7 @@ ACTIVATIONS = {
 
 
 class FrictionMLP(nn.Module):
-    """Feedforward MLP: 3 inputs → hidden layers → 1 output (mu_d)."""
+    """Feedforward MLP: 3 inputs → hidden layers → 1 output (force_mN_sensed)."""
 
     def __init__(self, hidden_dims=(32, 32), activation="relu", dropout=0.0):
         """
