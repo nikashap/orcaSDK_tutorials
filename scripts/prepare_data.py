@@ -283,6 +283,62 @@ def save_coverage_report(report, output_dir):
     return path
 
 
+def plot_realized_slices(train, val, test, output_dir, n_slices=5):
+    """Plot position vs velocity colored by F_sensed at different F_realized slices."""
+    all_pos = np.concatenate([train["position_um_aligned"],
+                              val["position_um_aligned"],
+                              test["position_um_aligned"]])
+    all_vel = np.concatenate([train["velocity_mm_s_aligned"],
+                              val["velocity_mm_s_aligned"],
+                              test["velocity_mm_s_aligned"]])
+    all_realized = np.concatenate([train["force_mN_realized_aligned"],
+                                   val["force_mN_realized_aligned"],
+                                   test["force_mN_realized_aligned"]])
+    all_sensed = np.concatenate([train["force_mN_sensed_aligned"],
+                                 val["force_mN_sensed_aligned"],
+                                 test["force_mN_sensed_aligned"]])
+
+    edges = np.linspace(all_realized.min(), all_realized.max(), n_slices + 1)
+
+    vmin_sensed = np.percentile(all_sensed, 2)
+    vmax_sensed = np.percentile(all_sensed, 98)
+
+    fig, axes = plt.subplots(1, n_slices, figsize=(5 * n_slices, 5))
+    if n_slices == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (all_realized >= lo) & (all_realized < hi)
+        if i == n_slices - 1:
+            mask = (all_realized >= lo) & (all_realized <= hi)
+
+        if mask.sum() == 0:
+            ax.set_title(f"F_realized: [{lo:.0f}, {hi:.0f}] mN\n(no data)")
+            continue
+
+        step = max(1, mask.sum() // 15000)
+        idx = np.where(mask)[0][::step]
+
+        sc = ax.scatter(all_pos[idx], all_vel[idx],
+                        s=3, alpha=0.3, c=all_sensed[idx],
+                        cmap="viridis", vmin=vmin_sensed, vmax=vmax_sensed)
+        ax.set_xlabel("Position (µm)")
+        if i == 0:
+            ax.set_ylabel("Velocity (mm/s)")
+        ax.set_title(f"F_realized: [{lo:.0f}, {hi:.0f}] mN\n({mask.sum()} pts)")
+        ax.grid(True, alpha=0.3)
+
+    fig.colorbar(sc, ax=axes, label="F_sensed (mN)", shrink=0.8)
+    plt.suptitle("Position vs velocity at F_realized slices, colored by F_sensed",
+                 fontsize=13, y=1.02)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "realized_slices.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved F_realized slice plot: {path}")
+
+
 def plot_coverage(train, val, test, output_dir):
     """Save 2D projections and a 3D scatter of the input space by split."""
     pairs = [
@@ -440,6 +496,7 @@ def main():
     report = compute_coverage_report(train, val, test)
     save_coverage_report(report, output_dir)
     plot_coverage(train, val, test, output_dir)
+    plot_realized_slices(train, val, test, output_dir)
 
     gc = report["grid_coverage"]
     print(f"  3D grid ({gc['n_bins_per_axis']}³): "

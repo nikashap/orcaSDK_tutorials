@@ -514,6 +514,53 @@ def plot_stribeck_3d(friction_trials, force_levels):
     return fig
 
 
+def plot_realized_and_sensed_accels(friction_trials, force_levels):
+    """Plot two 3D subplots comparing sensed vs realized force at each point."""
+    positions = []
+    velocities = []
+    force_sensed = []
+    force_realized = []
+
+    for force_mN in force_levels:
+        recs = [r for r in friction_trials if r["force_label_mN"] == force_mN]
+        for r in recs:
+            mask = r["t_stream_s"] >= T_IGNORE_S
+            positions.extend(r["position_um_aligned"][mask].tolist())
+            velocities.extend(r["velocity_mm_s_aligned"][mask].tolist())
+            force_sensed.extend(r["force_mN"][mask].tolist())
+            force_realized.extend(
+                (M_SHAFT_KG * r["accel_mmpss"][mask]).tolist()
+            )
+
+    fig = plt.figure(figsize=(20, 8))
+
+    ax1 = fig.add_subplot(121, projection="3d")
+    sc1 = ax1.scatter(positions, velocities, force_sensed,
+                      s=4, alpha=0.3, c=force_realized, cmap="viridis")
+    cbar1 = fig.colorbar(sc1, ax=ax1, shrink=0.6, pad=0.1)
+    cbar1.set_label("F_realized = m·a (mN)")
+    ax1.set_xlabel("Position (µm)")
+    ax1.set_ylabel("Velocity (mm/s)")
+    ax1.set_zlabel("F_sensed (mN)")
+    ax1.set_title("Sensed force, colored by realized force")
+
+    ax2 = fig.add_subplot(122, projection="3d")
+    sc2 = ax2.scatter(positions, velocities, force_realized,
+                      s=4, alpha=0.3, c=force_sensed, cmap="viridis")
+    cbar2 = fig.colorbar(sc2, ax=ax2, shrink=0.6, pad=0.1)
+    cbar2.set_label("F_sensed (mN)")
+    ax2.set_xlabel("Position (µm)")
+    ax2.set_ylabel("Velocity (mm/s)")
+    ax2.set_zlabel("F_realized = m·a (mN)")
+    ax2.set_title("Realized force, colored by sensed force")
+
+    plt.suptitle(f"Sensed vs realized force (m={M_SHAFT_KG} kg, "
+                 f"t ≥ {T_IGNORE_S} s, shift={STREAM_FORCE_SHIFT})",
+                 fontsize=13)
+    plt.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Save augmented data
 # ---------------------------------------------------------------------------
@@ -762,6 +809,13 @@ def main():
     fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
     print(f"  Saved: {faux_path}")
 
+    # --- Plot 7: Realized vs sensed force 3D ---
+    print("Generating realized vs sensed force 3D plots...")
+    fig_rs = plot_realized_and_sensed_accels(friction_trials, force_levels)
+    rs_path = os.path.join(EXPERIMENT_DIR, "realized_vs_sensed_force_3d.png")
+    fig_rs.savefig(rs_path, dpi=150, bbox_inches="tight")
+    print(f"  Saved: {rs_path}")
+
     # --- Save augmented data ---
     print("\nSaving augmented data with friction estimates...")
     save_augmented_data(EXPERIMENT_DIR, friction_trials, merged_metadata)
@@ -785,7 +839,7 @@ def main():
     print(f"\n  Static friction reference: {F_STATIC_LOW_MN}–{F_STATIC_HIGH_MN} mN "
           f"(μ_s ≈ {F_STATIC_LOW_MN/WEIGHT_MN:.4f}–{F_STATIC_HIGH_MN/WEIGHT_MN:.4f})")
 
-    # plt.show()
+    plt.show()
 
 
 if __name__ == "__main__":
