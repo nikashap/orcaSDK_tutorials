@@ -66,6 +66,7 @@ F_STATIC_HIGH_MN = PARAMS["static_friction_high_mN"]
 STREAM_FORCE_SHIFT = PARAMS.get("stream_force_shift", 0)
 USB_CHIP = PARAMS.get("usb_chip", "unknown")
 VELOCITY_CUTOFF = PARAMS.get("velocity_cutoff_mm_s", 5.0)
+ACCEL_CUTOFF = PARAMS.get("accel_cutoff_mmpss", 20.0)
 RAMPDOWN_MIN_TRAVEL_UM = PARAMS.get("rampdown_min_travel_um", 2540)
 
 
@@ -567,6 +568,7 @@ def plot_realized_and_sensed_accels(friction_trials, force_levels):
 
 def save_augmented_data(experiment_dir, friction_trials, metadata,
                         velocity_cutoff=VELOCITY_CUTOFF,
+                        accel_cutoff=ACCEL_CUTOFF,
                         rampdown_min_travel_um=RAMPDOWN_MIN_TRAVEL_UM):
     """
     Save a new .npz with all per-sample arrays aligned after shift trimming.
@@ -578,8 +580,10 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
     Filters applied before saving (for MLP training quality):
       - Rampdown trials where total post-switch shaft travel < rampdown_min_travel_um
         are excluded entirely (stiction-dominated trials with noisy labels).
-      - Samples where |velocity_aligned| <= velocity_cutoff are excluded
-        (static regime — noisy friction estimates near zero velocity).
+      - Samples where |velocity_aligned| <= velocity_cutoff AND
+        |accel_aligned| <= accel_cutoff are excluded (static regime — shaft
+        truly stuck with noisy labels). Samples with small velocity but
+        significant acceleration (e.g. breakaway) are kept.
 
     Includes per-sample force_commanded_mN and force_sensed_unshifted_mN
     (sensed force at the same timepoint as position/velocity, before shift
@@ -602,7 +606,9 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
                 continue
 
         vel = r["velocity_mm_s_aligned"]
-        mask = np.abs(vel) > velocity_cutoff
+        accel = r["accel_mmpss"]
+        static_mask = (np.abs(vel) <= velocity_cutoff) & (np.abs(accel) <= accel_cutoff)
+        mask = ~static_mask
 
         if np.sum(mask) == 0:
             continue
@@ -615,7 +621,8 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
         n_samples_after += np.sum(mask)
 
     print(f"  Filtering for training data:")
-    print(f"    Velocity cutoff: |v| > {velocity_cutoff} mm/s")
+    print(f"    Static regime filter: |v| <= {velocity_cutoff} mm/s AND "
+          f"|a| <= {accel_cutoff} mm/s²")
     print(f"    Rampdown min travel: {rampdown_min_travel_um} um")
     print(f"    Rampdown trials dropped (insufficient travel): {n_rampdown_dropped}")
     print(f"    Trials kept: {len(filtered_trials)} / {len(friction_trials)}")
@@ -686,6 +693,7 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
     out["rw_window"] = RW_WINDOW
     out["stream_force_shift"] = STREAM_FORCE_SHIFT
     out["velocity_cutoff_mm_s"] = velocity_cutoff
+    out["accel_cutoff_mmpss"] = accel_cutoff
     out["rampdown_min_travel_um"] = rampdown_min_travel_um
 
     out_path = os.path.join(experiment_dir, "stribeck_data.npz")
