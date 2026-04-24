@@ -14,7 +14,7 @@ shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inc
 motor_min_um: 1300                   # minimum shaft position (micrometers)
 motor_max_um: 670000                # maximum shaft position (micrometers)
 
-# Experiment position window — calibration data is collected within this range
+# Experiment position window — for constant force trials
 experiment_min_pos_um: 20000          # start of usable range (micrometers)
 experiment_max_pos_um: 70000       # end of usable range (micrometers)
 
@@ -139,7 +139,6 @@ rampdown_switch_positions_um: [       # positions at which the force switches to
 
 ]
 rampdown_starting_positions_um: [     # starting positions for the shaft before startup force
-    20000,
     120000,
     270000,
     370000,
