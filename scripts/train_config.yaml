@@ -25,10 +25,6 @@ seed: 42
 # set here to override.
 # t_ignore_s_override: null
 
-# Data augmentation: create a mirror of each training sample with the sign
-# of velocity_mm_s_aligned flipped. Doubles the training set size.
-augment_velocity_flip: true
-
 # ---------------------------------------------------------------------------
 # Model architecture
 # ---------------------------------------------------------------------------

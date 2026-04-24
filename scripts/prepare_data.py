@@ -193,24 +193,6 @@ def compute_norm_stats(train_samples):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def augment_velocity_sign_flip(samples):
-    """Create paired data points with velocity sign flipped.
-
-    For each original sample, a mirror sample is created where
-    velocity_mm_s_aligned has its sign negated. All other features and the
-    target (mu_d) are kept identical. Returns a new samples dict with double
-    the original size.
-    """
-    flipped = {}
-    for key, arr in samples.items():
-        if key == "velocity_mm_s_aligned":
-            flipped[key] = -arr
-        else:
-            flipped[key] = arr.copy()
-
-    return {k: np.concatenate([samples[k], flipped[k]]) for k in samples}
-
-
 def compute_coverage_report(train, val, test, n_bins=20):
     """Compute per-feature ranges and 3D grid coverage statistics.
 
@@ -374,7 +356,6 @@ def main():
     test_ratio = cfg["test_ratio"]
     seed = cfg["seed"]
     t_ignore_s = cfg.get("t_ignore_s_override", None)
-    augment_velocity_flip = cfg.get("augment_velocity_flip", False)
 
     # Resolve data directories and YAML paths
     data_base = os.path.join(repo_root, "data")
@@ -412,16 +393,7 @@ def main():
     print(f"  Val:   {len(val['mu_d'])} samples")
     print(f"  Test:  {len(test['mu_d'])} samples")
 
-    # Save pre-augmentation train for coverage analysis
-    train_raw = {k: v.copy() for k, v in train.items()}
-
-    # Velocity sign-flip augmentation (training set only)
-    if augment_velocity_flip:
-        train = augment_velocity_sign_flip(train)
-        print(f"\nVelocity sign-flip augmentation: "
-              f"{len(train_raw['mu_d'])} → {len(train['mu_d'])} training samples")
-
-    # Normalization stats (from training set only, after augmentation)
+    # Normalization stats (from training set only)
     norm_stats = compute_norm_stats(train)
     print("\nNormalization stats (from training set):")
     for k, v in norm_stats.items():
@@ -458,15 +430,14 @@ def main():
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
-        augment_velocity_flip=augment_velocity_flip,
     )
     print(f"\nSaved dataset: {out_path}")
 
-    # Coverage analysis (uses pre-augmentation train for honest ranges)
+    # Coverage analysis
     print("\nComputing input space coverage...")
-    report = compute_coverage_report(train_raw, val, test)
+    report = compute_coverage_report(train, val, test)
     save_coverage_report(report, output_dir)
-    plot_coverage(train_raw, val, test, output_dir)
+    plot_coverage(train, val, test, output_dir)
 
     gc = report["grid_coverage"]
     print(f"  3D grid ({gc['n_bins_per_axis']}³): "
