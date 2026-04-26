@@ -738,6 +738,18 @@ def main():
 
         all_force_levels.update(metadata["force_levels_mN"])
 
+        # Dataset-specific exclusions
+        if _args.date == "26_04_24-17_06_58":
+            max_force = 9000
+            before = len(trials)
+            trials = {k: v for k, v in trials.items()
+                      if v["force_label_mN"] < max_force}
+            metadata["force_levels_mN"] = [
+                f for f in metadata["force_levels_mN"] if f < max_force
+            ]
+            print(f"  Dataset exception: excluded target_forces >= {max_force} mN "
+                  f"({before - len(trials)} trials removed)")
+
         for tnum in sorted(trials.keys()):
             renumbered = trial_offset + tnum
             trial = trials[tnum]

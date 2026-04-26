@@ -441,6 +441,19 @@ def main():
     print(f"Total: {n_trials} trials, {n_total} samples "
           f"(after t_ignore={t_ignore_s}s filter)")
 
+    # Exclude positions outside the experiment range
+    MIN_POSITION_UM = 10000
+    MAX_POSITION_UM = 550000
+    pos = samples["position_um_aligned"]
+    pos_mask = (pos >= MIN_POSITION_UM) & (pos <= MAX_POSITION_UM)
+    n_excluded = int(np.sum(~pos_mask))
+    if n_excluded > 0:
+        samples = {k: v[pos_mask] for k, v in samples.items()}
+        trial_ids = trial_ids[pos_mask]
+        print(f"Position filter: excluded {n_excluded} samples outside "
+              f"[{MIN_POSITION_UM}, {MAX_POSITION_UM}] µm "
+              f"({len(trial_ids)} remaining)")
+
     # Split
     print(f"\nSplitting by trial: "
           f"train={train_ratio}, val={val_ratio}, test={test_ratio}, seed={seed}")
