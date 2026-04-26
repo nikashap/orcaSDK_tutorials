@@ -116,30 +116,27 @@ friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 # deceleration / low-force coasting — regimes unreachable from rest.
 rampdown_startup_force_mN: -15000     # high force to get shaft moving
 rampdown_target_forces_mN: [         # forces to step down to (including 0 and negative)
-    0,
-    -500,
-    -1000,
-    -1500,
-    -2000,
-    -2500,
-    -3000,
-    -3500,
-    -4000,
-    -4500,
-    -5000,
-    -5500,
-    -6000,
+    6500,
+    7000,
+    8000,
+    9000,
+    10000,
+    15000,
+    20000,
 ]
 rampdown_switch_positions_um: [       # positions at which the force switches to the target
     20000,
     120000,
+    170000,
+    220000,
     270000,
+    320000,
     370000,
-    470000,
+    420000,
 
 ]
 rampdown_starting_positions_um: [     # starting positions for the shaft before startup force
-    120000,
+    170000,
     270000,
     370000,
     470000,

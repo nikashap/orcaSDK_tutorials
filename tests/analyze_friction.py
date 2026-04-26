@@ -847,7 +847,7 @@ def main():
     print(f"\n  Static friction reference: {F_STATIC_LOW_MN}–{F_STATIC_HIGH_MN} mN "
           f"(μ_s ≈ {F_STATIC_LOW_MN/WEIGHT_MN:.4f}–{F_STATIC_HIGH_MN/WEIGHT_MN:.4f})")
 
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":
