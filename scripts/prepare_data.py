@@ -80,13 +80,18 @@ def _get_npz_key(d, new_key, old_key):
 
 def load_and_merge(data_dirs, t_ignore_s):
     """Load stribeck_data.npz from each date, apply t_ignore filter,
-    and merge into flat arrays.
+    compute previous-timestep features, and merge into flat arrays.
+
+    The first sample of each trial is dropped because it has no valid
+    previous-timestep data.
 
     Returns
     -------
     samples : dict of 1-D arrays, all length N_total
-        Keys: position_um_aligned, velocity_mm_s_aligned,
-              force_mN_realized_aligned, force_mN_sensed_aligned
+        Current-timestep keys: position_um_aligned, velocity_mm_s_aligned,
+            force_mN_realized_aligned, force_mN_sensed_aligned
+        Previous-timestep keys: accel_mmpss_prev, velocity_mm_s_prev,
+            position_um_prev
     trial_ids : 1-D int array, length N_total
     n_trials_total : int
     """
@@ -94,6 +99,9 @@ def load_and_merge(data_dirs, t_ignore_s):
     all_velocity = []
     all_force_realized = []
     all_force_sensed = []
+    all_accel_prev = []
+    all_velocity_prev = []
+    all_position_prev = []
     all_trial_id = []
     global_trial = 0
 
@@ -106,17 +114,26 @@ def load_and_merge(data_dirs, t_ignore_s):
         t_stream = d["t_stream_s"]
         position = d["position_um_aligned"]
         velocity = d["velocity_mm_s_aligned"]
+        accel = d["accel_mmpss_aligned"]
         force_sensed = _get_npz_key(d, "force_mN_sensed_aligned",
                                     "force_mN_aligned")
         if "force_mN_realized_aligned" in d:
             force_realized = d["force_mN_realized_aligned"]
         else:
             mass = float(d["mass_shaft_kg"])
-            force_realized = mass * d["accel_mmpss_aligned"]
+            force_realized = mass * accel
 
         for i in range(n_trials):
             lo, hi = int(boundaries[i]), int(boundaries[i + 1])
-            t_trial = t_stream[lo:hi]
+            n_trial = hi - lo
+            if n_trial < 2:
+                global_trial += 1
+                continue
+
+            # Drop first sample of trial (no valid "previous" data).
+            # Current values: indices [lo+1 : hi]
+            # Previous values: indices [lo : hi-1]  (one step behind)
+            t_trial = t_stream[lo + 1:hi]
             t0 = t_trial[0] if len(t_trial) > 0 else 0.0
             t_rel = t_trial - t0
 
@@ -126,10 +143,15 @@ def load_and_merge(data_dirs, t_ignore_s):
                 global_trial += 1
                 continue
 
-            all_position.append(position[lo:hi][mask])
-            all_velocity.append(velocity[lo:hi][mask])
-            all_force_realized.append(force_realized[lo:hi][mask])
-            all_force_sensed.append(force_sensed[lo:hi][mask])
+            all_position.append(position[lo + 1:hi][mask])
+            all_velocity.append(velocity[lo + 1:hi][mask])
+            all_force_realized.append(force_realized[lo + 1:hi][mask])
+            all_force_sensed.append(force_sensed[lo + 1:hi][mask])
+
+            all_accel_prev.append(accel[lo:hi - 1][mask])
+            all_velocity_prev.append(velocity[lo:hi - 1][mask])
+            all_position_prev.append(position[lo:hi - 1][mask])
+
             all_trial_id.append(
                 np.full(n_keep, global_trial, dtype=np.int32)
             )
@@ -142,6 +164,9 @@ def load_and_merge(data_dirs, t_ignore_s):
         "velocity_mm_s_aligned": np.concatenate(all_velocity),
         "force_mN_realized_aligned": np.concatenate(all_force_realized),
         "force_mN_sensed_aligned": np.concatenate(all_force_sensed),
+        "accel_mmpss_prev": np.concatenate(all_accel_prev),
+        "velocity_mm_s_prev": np.concatenate(all_velocity_prev),
+        "position_um_prev": np.concatenate(all_position_prev),
     }
     trial_ids = np.concatenate(all_trial_id)
 
@@ -176,14 +201,14 @@ def split_by_trial(samples, trial_ids, n_trials, train_ratio, val_ratio,
 # ── Normalization ────────────────────────────────────────────────────────────
 
 INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_realized_aligned"]
-EXTRA_FEATURE_KEYS = []
+LAGGED_KEYS = ["accel_mmpss_prev", "velocity_mm_s_prev", "position_um_prev"]
 TARGET_KEY = "force_mN_sensed_aligned"
 
 
 def compute_norm_stats(train_samples):
-    """Compute mean/std from training set for each input and extra feature."""
+    """Compute mean/std from training set for each input, lagged, and target feature."""
     stats = {}
-    for key in INPUT_KEYS + EXTRA_FEATURE_KEYS:
+    for key in INPUT_KEYS + LAGGED_KEYS:
         arr = train_samples[key]
         stats[key + "_mean"] = float(np.mean(arr))
         stats[key + "_std"] = float(np.std(arr))
@@ -475,33 +500,19 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "friction_dataset.npz")
 
-    np.savez(
-        out_path,
-        # Train
-        train_position_um_aligned=train["position_um_aligned"],
-        train_velocity_mm_s_aligned=train["velocity_mm_s_aligned"],
-        train_force_mN_realized_aligned=train["force_mN_realized_aligned"],
-        train_force_mN_sensed_aligned=train["force_mN_sensed_aligned"],
-        # Validation
-        val_position_um_aligned=val["position_um_aligned"],
-        val_velocity_mm_s_aligned=val["velocity_mm_s_aligned"],
-        val_force_mN_realized_aligned=val["force_mN_realized_aligned"],
-        val_force_mN_sensed_aligned=val["force_mN_sensed_aligned"],
-        # Test
-        test_position_um_aligned=test["position_um_aligned"],
-        test_velocity_mm_s_aligned=test["velocity_mm_s_aligned"],
-        test_force_mN_realized_aligned=test["force_mN_realized_aligned"],
-        test_force_mN_sensed_aligned=test["force_mN_sensed_aligned"],
-        # Normalization
-        **norm_stats,
-        # Config snapshot
-        data_dates=np.array(data_dates),
-        seed=seed,
-        t_ignore_s=t_ignore_s,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-    )
+    save_dict = {}
+    for split_name, split_data in [("train", train), ("val", val), ("test", test)]:
+        for key in INPUT_KEYS + LAGGED_KEYS + [TARGET_KEY]:
+            save_dict[f"{split_name}_{key}"] = split_data[key]
+    save_dict.update(norm_stats)
+    save_dict["data_dates"] = np.array(data_dates)
+    save_dict["seed"] = seed
+    save_dict["t_ignore_s"] = t_ignore_s
+    save_dict["train_ratio"] = train_ratio
+    save_dict["val_ratio"] = val_ratio
+    save_dict["test_ratio"] = test_ratio
+
+    np.savez(out_path, **save_dict)
     print(f"\nSaved dataset: {out_path}")
 
     # Coverage analysis

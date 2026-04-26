@@ -2,7 +2,8 @@
 friction_model.py
 
 PyTorch dataset and model for predicting force_mN_sensed_aligned from
-(position_um_aligned, velocity_mm_s_aligned, force_mN_realized_aligned).
+motor kinematic features.  Supports four model variants with increasing
+input dimensionality (see MODEL_VARIANTS).
 
 Used by train_model.py.  Can also be imported at inference time
 in the real-time control loop.
@@ -14,6 +15,42 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 
 
+# ── Model variants ──────────────────────────────────────────────────────────
+# Each variant maps to an ordered list of input keys stored in friction_dataset.npz.
+# All variants predict force_mN_sensed_aligned.
+
+MODEL_VARIANTS = {
+    1: [
+        "force_mN_realized_aligned",
+        "position_um_aligned",
+        "velocity_mm_s_aligned",
+    ],
+    2: [
+        "force_mN_realized_aligned",
+        "position_um_aligned",
+        "velocity_mm_s_aligned",
+        "accel_mmpss_prev",
+    ],
+    3: [
+        "force_mN_realized_aligned",
+        "position_um_aligned",
+        "velocity_mm_s_aligned",
+        "velocity_mm_s_prev",
+        "accel_mmpss_prev",
+    ],
+    4: [
+        "force_mN_realized_aligned",
+        "position_um_aligned",
+        "velocity_mm_s_aligned",
+        "position_um_prev",
+        "velocity_mm_s_prev",
+        "accel_mmpss_prev",
+    ],
+}
+
+TARGET_KEY = "force_mN_sensed_aligned"
+
+
 # ── Dataset ──────────────────────────────────────────────────────────────────
 
 class FrictionDataset(Dataset):
@@ -23,11 +60,7 @@ class FrictionDataset(Dataset):
     Target (force_mN_sensed_aligned) is NOT normalized.
     """
 
-    INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned",
-                   "force_mN_realized_aligned"]
-    TARGET_KEY = "force_mN_sensed_aligned"
-
-    def __init__(self, npz_path, split="train"):
+    def __init__(self, npz_path, split="train", model_variant=1):
         """
         Parameters
         ----------
@@ -35,33 +68,37 @@ class FrictionDataset(Dataset):
             Path to friction_dataset.npz produced by prepare_data.py.
         split : str
             One of "train", "val", "test".
+        model_variant : int
+            Which input feature set to use (1–4). See MODEL_VARIANTS.
         """
+        if model_variant not in MODEL_VARIANTS:
+            raise ValueError(f"Unknown model_variant={model_variant}. "
+                             f"Choose from {list(MODEL_VARIANTS.keys())}")
+
+        self.input_keys = MODEL_VARIANTS[model_variant]
         d = np.load(npz_path, allow_pickle=True)
 
         raw_inputs = []
-        for key in self.INPUT_KEYS:
+        self.norm_stats = {}
+        for key in self.input_keys:
             arr = d[f"{split}_{key}"].astype(np.float32)
             mean = float(d[f"{key}_mean"])
             std = float(d[f"{key}_std"])
             if std < 1e-12:
                 std = 1.0
             raw_inputs.append((arr - mean) / std)
+            self.norm_stats[key] = {"mean": mean, "std": std}
 
         self.X = torch.from_numpy(np.column_stack(raw_inputs))
         self.y = torch.from_numpy(
-            d[f"{split}_{self.TARGET_KEY}"].astype(np.float32)
+            d[f"{split}_{TARGET_KEY}"].astype(np.float32)
         )
 
-        self.norm_stats = {}
-        for key in self.INPUT_KEYS:
-            self.norm_stats[key] = {
-                "mean": float(d[f"{key}_mean"]),
-                "std": float(d[f"{key}_std"]),
-            }
-        self.norm_stats[self.TARGET_KEY] = {
-            "mean": float(d[f"{self.TARGET_KEY}_mean"]),
-            "std": float(d[f"{self.TARGET_KEY}_std"]),
+        self.norm_stats[TARGET_KEY] = {
+            "mean": float(d[f"{TARGET_KEY}_mean"]),
+            "std": float(d[f"{TARGET_KEY}_std"]),
         }
+        self.n_inputs = len(self.input_keys)
 
     def __len__(self):
         return len(self.y)
@@ -76,23 +113,16 @@ ACTIVATIONS = {
     "relu": nn.ReLU,
     "tanh": nn.Tanh,
     "leaky_relu": nn.LeakyReLU,
+    "gelu": nn.GELU,
+    "elu": nn.ELU,
 }
 
 
 class FrictionMLP(nn.Module):
-    """Feedforward MLP: 3 inputs → hidden layers → 1 output (force_mN_sensed)."""
+    """Feedforward MLP: n_inputs → hidden layers → 1 output (force_mN_sensed)."""
 
-    def __init__(self, hidden_dims=(32, 32), activation="relu", dropout=0.0):
-        """
-        Parameters
-        ----------
-        hidden_dims : list of int
-            Width of each hidden layer.
-        activation : str
-            Activation function name ("relu", "tanh", "leaky_relu").
-        dropout : float
-            Dropout probability applied after each hidden layer (0 = none).
-        """
+    def __init__(self, n_inputs=3, hidden_dims=(32, 32), activation="relu",
+                 dropout=0.0):
         super().__init__()
 
         act_cls = ACTIVATIONS.get(activation)
@@ -100,7 +130,6 @@ class FrictionMLP(nn.Module):
             raise ValueError(f"Unknown activation: {activation!r}. "
                              f"Choose from {list(ACTIVATIONS.keys())}")
 
-        n_inputs = 3
         layers = []
         prev_dim = n_inputs
         for dim in hidden_dims:
@@ -114,5 +143,4 @@ class FrictionMLP(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        """x: (batch, 3) → (batch,)"""
         return self.net(x).squeeze(-1)

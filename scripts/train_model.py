@@ -8,6 +8,7 @@ Saves:
   - best_model.pt          (checkpoint with lowest val loss)
   - training_curves.png    (train + val loss over epochs)
   - train_config.yaml      (copy of the config used)
+  - metrics.yaml           (final train/val/test losses and metadata)
 
 Usage:
     python train_model.py --config train_config.yaml
@@ -17,6 +18,7 @@ import argparse
 import copy
 import os
 import shutil
+import time
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -26,7 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import yaml
 
-from friction_model import FrictionDataset, FrictionMLP
+from friction_model import FrictionDataset, FrictionMLP, MODEL_VARIANTS
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -97,13 +99,24 @@ def main():
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    output_dir = os.path.join(repo_root, cfg["output_dir"])
-    dataset_path = os.path.join(output_dir, "friction_dataset.npz")
+    # Resolve output_dir: absolute paths used as-is, relative joined with repo_root
+    output_dir = cfg["output_dir"]
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.join(repo_root, output_dir)
+
+    # Dataset path: allow override via config, else default location
+    dataset_path = cfg.get("dataset_path", None)
+    if dataset_path is None:
+        dataset_path = os.path.join(output_dir, "friction_dataset.npz")
+    elif not os.path.isabs(dataset_path):
+        dataset_path = os.path.join(repo_root, dataset_path)
 
     if not os.path.exists(dataset_path):
         print(f"ERROR: Dataset not found at {dataset_path}")
         print("Run prepare_data.py first.")
         return
+
+    os.makedirs(output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -113,10 +126,18 @@ def main():
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    # Model variant
+    model_variant = cfg.get("model_variant", 1)
+    print(f"Model variant: {model_variant} "
+          f"(inputs: {MODEL_VARIANTS[model_variant]})")
+
     # Datasets and loaders
-    train_ds = FrictionDataset(dataset_path, split="train")
-    val_ds = FrictionDataset(dataset_path, split="val")
-    test_ds = FrictionDataset(dataset_path, split="test")
+    train_ds = FrictionDataset(dataset_path, split="train",
+                               model_variant=model_variant)
+    val_ds = FrictionDataset(dataset_path, split="val",
+                             model_variant=model_variant)
+    test_ds = FrictionDataset(dataset_path, split="test",
+                              model_variant=model_variant)
 
     batch_size = cfg["batch_size"]
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -127,7 +148,9 @@ def main():
     print(f"Train: {len(train_ds)} samples, Val: {len(val_ds)}, Test: {len(test_ds)}")
 
     # Model
+    n_inputs = train_ds.n_inputs
     model = FrictionMLP(
+        n_inputs=n_inputs,
         hidden_dims=cfg["hidden_dims"],
         activation=cfg["activation"],
         dropout=cfg["dropout"],
@@ -160,17 +183,23 @@ def main():
 
     criterion = nn.MSELoss()
 
-    # Training loop
+    # Training loop with early stopping
     epochs = cfg["epochs"]
+    early_stopping_patience = cfg.get("early_stopping_patience", 0)
     train_losses = []
     val_losses = []
     best_val_loss = float("inf")
     best_state = None
     best_epoch = 0
+    epochs_no_improve = 0
 
-    print(f"\nTraining for {epochs} epochs...")
+    t_start = time.time()
+    print(f"\nTraining for up to {epochs} epochs "
+          f"(early stopping patience: {early_stopping_patience or 'disabled'})...")
+
     for epoch in range(1, epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer,
+                                     criterion, device)
         val_loss = evaluate(model, val_loader, criterion, device)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -181,8 +210,10 @@ def main():
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
             best_epoch = epoch
+            epochs_no_improve = 0
             marker = " *"
         else:
+            epochs_no_improve += 1
             marker = ""
 
         if epoch % 10 == 0 or epoch == 1 or marker:
@@ -196,10 +227,20 @@ def main():
             else:
                 scheduler.step()
 
+        if early_stopping_patience > 0 and epochs_no_improve >= early_stopping_patience:
+            print(f"  Early stopping at epoch {epoch} "
+                  f"(no improvement for {early_stopping_patience} epochs)")
+            break
+
+    train_time_s = time.time() - t_start
+
     # Save best model
     checkpoint_path = os.path.join(output_dir, "best_model.pt")
     checkpoint = {
         "model_state_dict": best_state,
+        "model_variant": model_variant,
+        "input_keys": MODEL_VARIANTS[model_variant],
+        "n_inputs": n_inputs,
         "hidden_dims": cfg["hidden_dims"],
         "activation": cfg["activation"],
         "dropout": cfg["dropout"],
@@ -224,7 +265,30 @@ def main():
     # Copy config
     config_copy_path = os.path.join(output_dir, "train_config.yaml")
     shutil.copy2(args.config, config_copy_path)
-    print(f"Config snapshot saved to {config_copy_path}")
+
+    # Save metrics
+    metrics = {
+        "model_variant": model_variant,
+        "n_inputs": n_inputs,
+        "n_params": n_params,
+        "hidden_dims": cfg["hidden_dims"],
+        "activation": cfg["activation"],
+        "dropout": cfg["dropout"],
+        "learning_rate": cfg["learning_rate"],
+        "weight_decay": cfg["weight_decay"],
+        "batch_size": cfg["batch_size"],
+        "best_epoch": best_epoch,
+        "epochs_trained": len(train_losses),
+        "train_mse": float(train_losses[best_epoch - 1]),
+        "val_mse": float(best_val_loss),
+        "test_mse": float(test_loss),
+        "test_rmse_mN": float(test_loss ** 0.5),
+        "train_time_s": round(train_time_s, 1),
+    }
+    metrics_path = os.path.join(output_dir, "metrics.yaml")
+    with open(metrics_path, "w") as f:
+        yaml.dump(metrics, f, default_flow_style=False, sort_keys=False)
+    print(f"Metrics saved to {metrics_path}")
 
 
 if __name__ == "__main__":

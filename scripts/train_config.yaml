@@ -50,26 +50,36 @@ seed: 42
 # ---------------------------------------------------------------------------
 # Model architecture
 # ---------------------------------------------------------------------------
-# Input features: position_um_aligned, velocity_mm_s_aligned, force_mN_realized_aligned (3 total)
-# Output: force_mN_sensed_aligned (1 scalar)
+# Model variant (1–4) determines input features:
+#   1: force_realized, position, velocity                        (3 inputs)
+#   2: force_realized, position, velocity, accel_prev            (4 inputs)
+#   3: force_realized, position, velocity, vel_prev, accel_prev  (5 inputs)
+#   4: force_realized, position, velocity, pos_prev, vel_prev, accel_prev (6 inputs)
+model_variant: 1
+
 hidden_dims: [32, 32]        # list of hidden layer widths
-activation: "relu"           # "relu", "tanh", or "leaky_relu"
+activation: "relu"           # "relu", "tanh", "leaky_relu", "gelu", "elu"
 dropout: 0.0                 # dropout probability (0 = no dropout)
 
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 batch_size: 256
-epochs: 200
+epochs: 300
 learning_rate: 1.0e-3
 weight_decay: 1.0e-4         # L2 regularization
 lr_scheduler: "plateau"      # "plateau", "cosine", or "none"
 plateau_patience: 10         # epochs with no val improvement before LR reduction
 plateau_factor: 0.5          # LR multiplied by this on plateau
+early_stopping_patience: 50  # stop if val loss doesn't improve for N epochs (0 = disabled)
 
 # ---------------------------------------------------------------------------
-# Output
+# Paths
 # ---------------------------------------------------------------------------
 # All outputs (model checkpoint, training curves, config snapshot) are saved
-# to this directory. Relative to orcaSDK_tutorials/.
+# to this directory. Relative paths are resolved from orcaSDK_tutorials/.
+# Absolute paths (e.g. /orcd/data/...) are used as-is.
 output_dir: "models/friction"
+
+# Optional: override dataset location (defaults to output_dir/friction_dataset.npz)
+# dataset_path: "/orcd/data/mjaz/001/nikashap/models/friction/friction_dataset.npz"
