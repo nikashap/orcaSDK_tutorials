@@ -54,11 +54,9 @@ seed: 42
 # ---------------------------------------------------------------------------
 # Model architecture
 # ---------------------------------------------------------------------------
-# Model variant (1–4) determines input features:
-#   1: force_realized, position, velocity                        (3 inputs)
-#   2: force_realized, position, velocity, accel_prev            (4 inputs)
-#   3: force_realized, position, velocity, vel_prev, accel_prev  (5 inputs)
-#   4: force_realized, position, velocity, pos_prev, vel_prev, accel_prev (6 inputs)
+# Model variant determines input features (all predict force_realized):
+#   1: position, velocity, force_sensed                          (3 inputs)
+#   2: position, velocity, accel_prev, force_sensed              (4 inputs)
 model_variant: 1
 
 hidden_dims: [32, 32]        # list of hidden layer widths

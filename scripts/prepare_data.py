@@ -89,9 +89,8 @@ def load_and_merge(data_dirs, t_ignore_s):
     -------
     samples : dict of 1-D arrays, all length N_total
         Current-timestep keys: position_um_aligned, velocity_mm_s_aligned,
-            force_mN_realized_aligned, force_mN_sensed_aligned
-        Previous-timestep keys: accel_mmpss_prev, velocity_mm_s_prev,
-            position_um_prev
+            force_mN_sensed_aligned, force_mN_realized_aligned
+        Previous-timestep keys: accel_mmpss_prev
     trial_ids : 1-D int array, length N_total
     n_trials_total : int
     """
@@ -100,9 +99,6 @@ def load_and_merge(data_dirs, t_ignore_s):
     all_force_realized = []
     all_force_sensed = []
     all_accel_prev = []
-    all_velocity_prev = []
-    all_position_prev = []
-    all_force_sensed_prev = []
     all_trial_id = []
     global_trial = 0
 
@@ -150,9 +146,6 @@ def load_and_merge(data_dirs, t_ignore_s):
             all_force_sensed.append(force_sensed[lo + 1:hi][mask])
 
             all_accel_prev.append(accel[lo:hi - 1][mask])
-            all_velocity_prev.append(velocity[lo:hi - 1][mask])
-            all_position_prev.append(position[lo:hi - 1][mask])
-            all_force_sensed_prev.append(force_sensed[lo:hi - 1][mask])
 
             all_trial_id.append(
                 np.full(n_keep, global_trial, dtype=np.int32)
@@ -164,12 +157,9 @@ def load_and_merge(data_dirs, t_ignore_s):
     samples = {
         "position_um_aligned": np.concatenate(all_position),
         "velocity_mm_s_aligned": np.concatenate(all_velocity),
-        "force_mN_realized_aligned": np.concatenate(all_force_realized),
         "force_mN_sensed_aligned": np.concatenate(all_force_sensed),
+        "force_mN_realized_aligned": np.concatenate(all_force_realized),
         "accel_mmpss_prev": np.concatenate(all_accel_prev),
-        "velocity_mm_s_prev": np.concatenate(all_velocity_prev),
-        "position_um_prev": np.concatenate(all_position_prev),
-        "force_mN_sensed_prev": np.concatenate(all_force_sensed_prev),
     }
     trial_ids = np.concatenate(all_trial_id)
 
@@ -203,10 +193,9 @@ def split_by_trial(samples, trial_ids, n_trials, train_ratio, val_ratio,
 
 # ── Normalization ────────────────────────────────────────────────────────────
 
-INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_realized_aligned"]
-LAGGED_KEYS = ["accel_mmpss_prev", "velocity_mm_s_prev", "position_um_prev",
-               "force_mN_sensed_prev"]
-TARGET_KEY = "force_mN_sensed_aligned"
+INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_sensed_aligned"]
+LAGGED_KEYS = ["accel_mmpss_prev"]
+TARGET_KEY = "force_mN_realized_aligned"
 
 
 def compute_norm_stats(train_samples):
@@ -231,11 +220,11 @@ def compute_coverage_report(train, val, test, n_bins=20):
     n_bins^3 grid and reports what fraction of cells contain data.
     """
     feature_keys = ["position_um_aligned", "velocity_mm_s_aligned",
-                    "force_mN_realized_aligned"]
+                    "force_mN_sensed_aligned"]
     feature_labels = {
         "position_um_aligned": {"unit": "µm", "short": "position"},
         "velocity_mm_s_aligned": {"unit": "mm/s", "short": "velocity"},
-        "force_mN_realized_aligned": {"unit": "mN", "short": "force_realized"},
+        "force_mN_sensed_aligned": {"unit": "mN", "short": "force_sensed"},
     }
 
     splits = {"train": train, "val": val, "test": test}
@@ -267,7 +256,7 @@ def compute_coverage_report(train, val, test, n_bins=20):
 
     pos_all = all_combined["position_um_aligned"]
     vel_all = all_combined["velocity_mm_s_aligned"]
-    frc_all = all_combined["force_mN_realized_aligned"]
+    frc_all = all_combined["force_mN_sensed_aligned"]
 
     pos_edges = np.linspace(pos_all.min(), pos_all.max(), n_bins + 1)
     vel_edges = np.linspace(vel_all.min(), vel_all.max(), n_bins + 1)
@@ -291,7 +280,7 @@ def compute_coverage_report(train, val, test, n_bins=20):
         hist_s, _ = np.histogramdd(
             np.column_stack([sdata["position_um_aligned"],
                              sdata["velocity_mm_s_aligned"],
-                             sdata["force_mN_realized_aligned"]]),
+                             sdata["force_mN_sensed_aligned"]]),
             bins=[pos_edges, vel_edges, frc_edges],
         )
         occ = int(np.sum(hist_s > 0))
@@ -312,25 +301,25 @@ def save_coverage_report(report, output_dir):
     return path
 
 
-def plot_realized_slices(train, val, test, output_dir, n_slices=5):
-    """Plot position vs velocity colored by F_sensed at different F_realized slices."""
+def plot_sensed_slices(train, val, test, output_dir, n_slices=5):
+    """Plot position vs velocity colored by F_realized at different F_sensed slices."""
     all_pos = np.concatenate([train["position_um_aligned"],
                               val["position_um_aligned"],
                               test["position_um_aligned"]])
     all_vel = np.concatenate([train["velocity_mm_s_aligned"],
                               val["velocity_mm_s_aligned"],
                               test["velocity_mm_s_aligned"]])
-    all_realized = np.concatenate([train["force_mN_realized_aligned"],
-                                   val["force_mN_realized_aligned"],
-                                   test["force_mN_realized_aligned"]])
     all_sensed = np.concatenate([train["force_mN_sensed_aligned"],
                                  val["force_mN_sensed_aligned"],
                                  test["force_mN_sensed_aligned"]])
+    all_realized = np.concatenate([train["force_mN_realized_aligned"],
+                                   val["force_mN_realized_aligned"],
+                                   test["force_mN_realized_aligned"]])
 
-    edges = np.linspace(all_realized.min(), all_realized.max(), n_slices + 1)
+    edges = np.linspace(all_sensed.min(), all_sensed.max(), n_slices + 1)
 
-    vmin_sensed = np.percentile(all_sensed, 2)
-    vmax_sensed = np.percentile(all_sensed, 98)
+    vmin_realized = np.percentile(all_realized, 2)
+    vmax_realized = np.percentile(all_realized, 98)
 
     fig, axes = plt.subplots(1, n_slices, figsize=(5 * n_slices, 5))
     if n_slices == 1:
@@ -338,34 +327,34 @@ def plot_realized_slices(train, val, test, output_dir, n_slices=5):
 
     for i, ax in enumerate(axes):
         lo, hi = edges[i], edges[i + 1]
-        mask = (all_realized >= lo) & (all_realized < hi)
+        mask = (all_sensed >= lo) & (all_sensed < hi)
         if i == n_slices - 1:
-            mask = (all_realized >= lo) & (all_realized <= hi)
+            mask = (all_sensed >= lo) & (all_sensed <= hi)
 
         if mask.sum() == 0:
-            ax.set_title(f"F_realized: [{lo:.0f}, {hi:.0f}] mN\n(no data)")
+            ax.set_title(f"F_sensed: [{lo:.0f}, {hi:.0f}] mN\n(no data)")
             continue
 
         step = max(1, mask.sum() // 15000)
         idx = np.where(mask)[0][::step]
 
         sc = ax.scatter(all_pos[idx], all_vel[idx],
-                        s=3, alpha=0.3, c=all_sensed[idx],
-                        cmap="viridis", vmin=vmin_sensed, vmax=vmax_sensed)
+                        s=3, alpha=0.3, c=all_realized[idx],
+                        cmap="viridis", vmin=vmin_realized, vmax=vmax_realized)
         ax.set_xlabel("Position (µm)")
         if i == 0:
             ax.set_ylabel("Velocity (mm/s)")
-        ax.set_title(f"F_realized: [{lo:.0f}, {hi:.0f}] mN\n({mask.sum()} pts)")
+        ax.set_title(f"F_sensed: [{lo:.0f}, {hi:.0f}] mN\n({mask.sum()} pts)")
         ax.grid(True, alpha=0.3)
 
-    fig.colorbar(sc, ax=axes, label="F_sensed (mN)", shrink=0.8)
-    plt.suptitle("Position vs velocity at F_realized slices, colored by F_sensed",
+    fig.colorbar(sc, ax=axes, label="F_realized (mN)", shrink=0.8)
+    plt.suptitle("Position vs velocity at F_sensed slices, colored by F_realized",
                  fontsize=13, y=1.02)
     plt.tight_layout()
-    path = os.path.join(output_dir, "realized_slices.png")
+    path = os.path.join(output_dir, "sensed_slices.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved F_realized slice plot: {path}")
+    print(f"Saved F_sensed slice plot: {path}")
 
 
 def plot_coverage(train, val, test, output_dir):
@@ -373,10 +362,10 @@ def plot_coverage(train, val, test, output_dir):
     pairs = [
         ("position_um_aligned", "velocity_mm_s_aligned",
          "Position (µm)", "Velocity (mm/s)"),
-        ("position_um_aligned", "force_mN_realized_aligned",
-         "Position (µm)", "Force realized (mN)"),
-        ("velocity_mm_s_aligned", "force_mN_realized_aligned",
-         "Velocity (mm/s)", "Force realized (mN)"),
+        ("position_um_aligned", "force_mN_sensed_aligned",
+         "Position (µm)", "Force sensed (mN)"),
+        ("velocity_mm_s_aligned", "force_mN_sensed_aligned",
+         "Velocity (mm/s)", "Force sensed (mN)"),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -407,19 +396,19 @@ def plot_coverage(train, val, test, output_dir):
     step_vt = max(1, len(val["position_um_aligned"]) // 5000)
     ax3.scatter(train["position_um_aligned"][::step_tr],
                 train["velocity_mm_s_aligned"][::step_tr],
-                train["force_mN_realized_aligned"][::step_tr],
+                train["force_mN_sensed_aligned"][::step_tr],
                 s=2, alpha=0.1, c="tab:blue", label="train")
     ax3.scatter(val["position_um_aligned"][::step_vt],
                 val["velocity_mm_s_aligned"][::step_vt],
-                val["force_mN_realized_aligned"][::step_vt],
+                val["force_mN_sensed_aligned"][::step_vt],
                 s=2, alpha=0.2, c="tab:orange", label="val")
     ax3.scatter(test["position_um_aligned"][::step_vt],
                 test["velocity_mm_s_aligned"][::step_vt],
-                test["force_mN_realized_aligned"][::step_vt],
+                test["force_mN_sensed_aligned"][::step_vt],
                 s=2, alpha=0.2, c="tab:green", label="test")
     ax3.set_xlabel("Position (µm)")
     ax3.set_ylabel("Velocity (mm/s)")
-    ax3.set_zlabel("Force realized (mN)")
+    ax3.set_zlabel("Force sensed (mN)")
     ax3.set_title("Input space coverage — 3D")
     ax3.legend(fontsize=8, markerscale=4)
     scatter_path = os.path.join(output_dir, "input_coverage_3d.png")
@@ -524,7 +513,7 @@ def main():
     report = compute_coverage_report(train, val, test)
     save_coverage_report(report, output_dir)
     plot_coverage(train, val, test, output_dir)
-    plot_realized_slices(train, val, test, output_dir)
+    plot_sensed_slices(train, val, test, output_dir)
 
     gc = report["grid_coverage"]
     print(f"  3D grid ({gc['n_bins_per_axis']}³): "

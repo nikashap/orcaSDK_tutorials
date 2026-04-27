@@ -21,38 +21,19 @@ from torch.utils.data import Dataset
 
 MODEL_VARIANTS = {
     1: [
-        "force_mN_realized_aligned",
         "position_um_aligned",
         "velocity_mm_s_aligned",
-        "force_mN_sensed_prev",
+        "force_mN_sensed_aligned",
     ],
     2: [
-        "force_mN_realized_aligned",
         "position_um_aligned",
         "velocity_mm_s_aligned",
-        "force_mN_sensed_prev",
         "accel_mmpss_prev",
-    ],
-    3: [
-        "force_mN_realized_aligned",
-        "position_um_aligned",
-        "velocity_mm_s_aligned",
-        "force_mN_sensed_prev",
-        "velocity_mm_s_prev",
-        "accel_mmpss_prev",
-    ],
-    4: [
-        "force_mN_realized_aligned",
-        "position_um_aligned",
-        "velocity_mm_s_aligned",
-        "force_mN_sensed_prev",
-        "position_um_prev",
-        "velocity_mm_s_prev",
-        "accel_mmpss_prev",
+        "force_mN_sensed_aligned",
     ],
 }
 
-TARGET_KEY = "force_mN_sensed_aligned"
+TARGET_KEY = "force_mN_realized_aligned"
 
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
