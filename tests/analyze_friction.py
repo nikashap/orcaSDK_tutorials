@@ -649,6 +649,10 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
     )
     f_friction_all = np.concatenate([r["f_friction_mN"] for r in filtered_trials])
     mu_d_all = np.concatenate([r["mu_d"] for r in filtered_trials])
+    force_sensed_prev_all = np.concatenate([
+        np.concatenate([[r["force_mN"][0]], r["force_mN"][:-1]])
+        for r in filtered_trials
+    ])
 
     # Recompute trial boundaries for filtered data
     trial_n_samples = np.array([len(r["mu_d"]) for r in filtered_trials],
@@ -685,6 +689,7 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
     out["velocity_mm_s_aligned"] = velocity_aligned_all
     out["f_friction_mN"] = f_friction_all
     out["mu_d"] = mu_d_all
+    out["force_mN_sensed_previous"] = force_sensed_prev_all
 
     # Analysis parameters
     out["velocity_estimator"] = VELOCITY_ESTIMATOR

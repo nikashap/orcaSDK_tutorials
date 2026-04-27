@@ -102,6 +102,7 @@ def load_and_merge(data_dirs, t_ignore_s):
     all_accel_prev = []
     all_velocity_prev = []
     all_position_prev = []
+    all_force_sensed_prev = []
     all_trial_id = []
     global_trial = 0
 
@@ -151,6 +152,7 @@ def load_and_merge(data_dirs, t_ignore_s):
             all_accel_prev.append(accel[lo:hi - 1][mask])
             all_velocity_prev.append(velocity[lo:hi - 1][mask])
             all_position_prev.append(position[lo:hi - 1][mask])
+            all_force_sensed_prev.append(force_sensed[lo:hi - 1][mask])
 
             all_trial_id.append(
                 np.full(n_keep, global_trial, dtype=np.int32)
@@ -167,6 +169,7 @@ def load_and_merge(data_dirs, t_ignore_s):
         "accel_mmpss_prev": np.concatenate(all_accel_prev),
         "velocity_mm_s_prev": np.concatenate(all_velocity_prev),
         "position_um_prev": np.concatenate(all_position_prev),
+        "force_mN_sensed_prev": np.concatenate(all_force_sensed_prev),
     }
     trial_ids = np.concatenate(all_trial_id)
 
@@ -201,7 +204,8 @@ def split_by_trial(samples, trial_ids, n_trials, train_ratio, val_ratio,
 # ── Normalization ────────────────────────────────────────────────────────────
 
 INPUT_KEYS = ["position_um_aligned", "velocity_mm_s_aligned", "force_mN_realized_aligned"]
-LAGGED_KEYS = ["accel_mmpss_prev", "velocity_mm_s_prev", "position_um_prev"]
+LAGGED_KEYS = ["accel_mmpss_prev", "velocity_mm_s_prev", "position_um_prev",
+               "force_mN_sensed_prev"]
 TARGET_KEY = "force_mN_sensed_aligned"
 
 
