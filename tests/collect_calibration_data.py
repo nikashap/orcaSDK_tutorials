@@ -453,13 +453,18 @@ def run_rampdown_trial(motor, startup_force_mN, target_force_mN,
             break
         if not moving_positive and pos_um <= MOTOR_MIN_UM:
             break
+        # Prevent shaft from slamming into one end or another
+        if moving_positive and target_force_mN < 0 and pos_um <= MOTOR_MIN_UM:
+            break
+        if not moving_positive and target_force_mN > 0 and pos_um >= MOTOR_MAX_UM:
+            break
 
         if switched and prev_pos is not None:
             if abs(pos_um - prev_pos) < 20:
                 consecutive_slow += 1
             else:
                 consecutive_slow = 0
-            if consecutive_slow > 10:
+            if consecutive_slow > 30:
                 print(f"    Shaft stopped after switch (position ~{pos_um} um)")
                 break
 

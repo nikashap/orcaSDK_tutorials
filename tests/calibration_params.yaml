@@ -11,8 +11,8 @@ shaft_absolute_length_inches: 36.0  # absolute physical length of the shaft (inc
 # ---------------------------------------------------------------------------
 # Motor position range (from AutoZero / IrisGui)
 # ---------------------------------------------------------------------------
-motor_min_um: 1300                   # minimum shaft position (micrometers)
-motor_max_um: 670000                # maximum shaft position (micrometers)
+motor_min_um: 10000                   # minimum shaft position (micrometers)
+motor_max_um: 600000                # maximum shaft position (micrometers)
 
 # Experiment position window — for constant force trials
 experiment_min_pos_um: 20000          # start of usable range (micrometers)
@@ -30,7 +30,7 @@ default_serial_port: "/dev/cu.usbserial-1460"
 # Auto-zero
 # ---------------------------------------------------------------------------
 auto_zero_force_n: 50               # max force during auto-zero (Newtons)
-auto_zero_speed_mmps: 100            # max speed during auto-zero (mm/s)
+auto_zero_speed_mmps: 200            # max speed during auto-zero (mm/s)
 
 # ---------------------------------------------------------------------------
 # Mass estimation trials (constant force procedure)
@@ -114,18 +114,18 @@ friction_pos_change_threshold_um: 50 # min position change to count as "moving"
 # "Running start" protocol: accelerate the shaft with a high startup force,
 # then switch to a lower target force mid-travel to capture friction during
 # deceleration / low-force coasting — regimes unreachable from rest.
-rampdown_startup_force_mN: -15000     # high force to get shaft moving
+rampdown_startup_force_mN: 15000     # high force to get shaft moving
 rampdown_target_forces_mN: [         # forces to step down to (including 0 and negative)
-    6500,
-    7000,
-    8000,
-    9000,
-    10000,
-    15000,
-    20000,
+    -6500,
+    -7000,
+    -8000,
+    -9000,
+    -10000,
+    -15000,
+    -20000,
+    -25000,
 ]
 rampdown_switch_positions_um: [       # positions at which the force switches to the target
-    20000,
     120000,
     170000,
     220000,
@@ -133,14 +133,15 @@ rampdown_switch_positions_um: [       # positions at which the force switches to
     320000,
     370000,
     420000,
+    520000,
 
 ]
 rampdown_starting_positions_um: [     # starting positions for the shaft before startup force
+    20000,
     170000,
     270000,
     370000,
     470000,
-    520000,
 ]
 rampdown_iterations_per_combo: 3      # trials per (target_force, switch_position, starting_position) combo
 
