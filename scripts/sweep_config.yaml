@@ -1,0 +1,60 @@
+# ============================================================================
+# Hyperparameter Sweep Configuration
+# ============================================================================
+# Used by run_sweep.py to generate random training configurations.
+
+# Number of random configurations to generate
+n_trials: 200
+
+# Base config — sweep overrides specific fields; everything else is inherited
+base_config: "train_config.yaml"
+
+# Where to save sweep configs and results (relative to repo root, or absolute)
+sweep_dir: "models/friction/sweeps"
+
+# ---------------------------------------------------------------------------
+# Search space
+# ---------------------------------------------------------------------------
+# Supported types:
+#   categorical: pick uniformly from 'values'
+#   log_uniform: sample 10^x where x ~ Uniform(log10(low), log10(high))
+#   uniform: sample ~ Uniform(low, high)
+
+search_space:
+  model_variant:
+    type: categorical
+    values: [1, 2, 3, 4]
+
+  learning_rate:
+    type: log_uniform
+    low: 1.0e-4
+    high: 1.0e-2
+
+  hidden_dims:
+    type: categorical
+    values:
+      - [32, 32]
+      - [64, 64]
+      - [128, 128]
+      - [64, 32]
+      - [128, 64]
+      - [128, 64, 32]
+      - [256, 128]
+      - [256, 128, 64]
+
+  activation:
+    type: categorical
+    values: ["relu", "tanh", "leaky_relu", "gelu", "elu"]
+
+  batch_size:
+    type: categorical
+    values: [128, 256, 512, 1024]
+
+  weight_decay:
+    type: log_uniform
+    low: 1.0e-6
+    high: 1.0e-3
+
+  dropout:
+    type: categorical
+    values: [0.0, 0.05, 0.1, 0.2]
