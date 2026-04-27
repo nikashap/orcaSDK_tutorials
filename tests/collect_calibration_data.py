@@ -58,6 +58,7 @@ AUTO_ZERO_SPEED_MMPS = PARAMS["auto_zero_speed_mmps"]
 BAUD_RATE = PARAMS["baud_rate"]
 INTERFRAME_DELAY = PARAMS["interframe_delay_us"]
 DEFAULT_SERIAL_PORT = PARAMS["default_serial_port"]
+CTRL_LOOP_DURATION_MS = PARAMS.get("ctrl_loop_duration_ms", 2.5) #average time it takes to execute motor command
 
 DEFAULT_FORCES_MN = PARAMS["force_levels_mN"]
 DEFAULT_ITERS_PER_FORCE = PARAMS["iterations_per_force"]
@@ -83,6 +84,15 @@ RAMPDOWN_SWITCH_POSITIONS_UM = PARAMS.get("rampdown_switch_positions_um", [37000
 RAMPDOWN_STARTING_POSITIONS_UM = PARAMS.get("rampdown_starting_positions_um",
                                             [EXPERIMENT_MIN_POS_UM])
 RAMPDOWN_ITERATIONS_PER_COMBO = PARAMS.get("rampdown_iterations_per_combo", 3)
+
+# Sinusoid parameters
+SINUSOID_PARAMS = PARAMS.get("sinusoid", {})
+SINUSOID_PERIODS_MS = SINUSOID_PARAMS.get("periods_ms", [1000])
+SINUSOID_NUM_CYCLES = SINUSOID_PARAMS.get("num_cycles", [5])
+SINUSOID_START_POSITIONS_UM = SINUSOID_PARAMS.get("start_positions_um",
+                                                   [EXPERIMENT_MID_POS_UM])
+SINUSOID_FORCE_AMPLITUDES_MN = SINUSOID_PARAMS.get("force_amplitudes_mN", [10000])
+SINUSOID_ITERS_PER_COMBO = SINUSOID_PARAMS.get("iters_per_combo", 2)
 
 
 def auto_zero_motor(motor):
@@ -647,6 +657,233 @@ def collect_rampdown_data(motor,
 
     return trial_n_samples
 
+# --------------------------------------------------------------------------
+# Sinusoidal data (command sinusoidal force trajectories)
+# --------------------------------------------------------------------------
+def run_sinusoid_trial(motor, period_ms, num_cycles, start_pos_um, force_amp_mN):
+    """
+    Run one sinusoidal force trial: move the shaft to start_pos_um, then
+    command F(t) = force_amp_mN * sin(2*pi*t/period) for num_cycles full
+    periods.  If the shaft reaches MOTOR_MIN_UM or MOTOR_MAX_UM the force
+    is cut to 0 and the trial ends early.
+
+    Returns dict with arrays:
+        t_stream, position_um, force_mN, t_accel, accel_mmpss,
+        force_commanded_mN (per-sample), hit_limit (bool)
+    """
+    move_to_position(motor, target_pos_um=start_pos_um)
+
+    period_s = period_ms / 1000.0
+    total_duration_s = num_cycles * period_s
+
+    t_stream_list = []
+    position_list = []
+    force_list = []
+    t_accel_list = []
+    accel_list = []
+    force_cmd_list = []
+
+    motor.set_mode(MotorMode.ForceMode)
+    motor.set_streamed_force_mN(0)
+
+    t_start = time.perf_counter()
+    hit_limit = False
+
+    while True:
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= total_duration_s:
+            break
+
+        force_cmd = int(force_amp_mN * np.sin(2 * np.pi * elapsed / period_s))
+        motor.set_streamed_force_mN(force_cmd)
+        motor.run()
+        t1 = time.perf_counter()
+
+        stream_data = motor.get_stream_data()
+        pos_um = stream_data.position
+        force_mN = stream_data.force
+
+        accel_mmpss = read_raw_acceleration(motor)
+        t2 = time.perf_counter()
+
+        t_stream_list.append(t1)
+        position_list.append(pos_um)
+        force_list.append(force_mN)
+        t_accel_list.append(t2)
+        accel_list.append(accel_mmpss)
+        force_cmd_list.append(force_cmd)
+
+        if pos_um >= MOTOR_MAX_UM or pos_um <= MOTOR_MIN_UM:
+            print(f"    Hit motor limit at position {pos_um} um, ending trial")
+            hit_limit = True
+            break
+
+        if stream_data.errors:
+            print(f"    Motor error: {stream_data.errors}")
+            break
+
+    motor.set_streamed_force_mN(0)
+    motor.set_mode(MotorMode.SleepMode)
+
+    return {
+        "t_stream": np.array(t_stream_list, dtype=np.float64),
+        "position_um": np.array(position_list, dtype=np.int32),
+        "force_mN": np.array(force_list, dtype=np.int32),
+        "t_accel": np.array(t_accel_list, dtype=np.float64),
+        "accel_mmpss": np.array(accel_list, dtype=np.int32),
+        "force_commanded_mN": np.array(force_cmd_list, dtype=np.int32),
+        "hit_limit": hit_limit,
+    }
+
+
+def collect_sinusoid_data(motor,
+                          periods_ms=None,
+                          num_cycles_list=None,
+                          start_positions_um=None,
+                          force_amplitudes_mN=None,
+                          iters_per_combo=SINUSOID_ITERS_PER_COMBO):
+    """
+    Collect sinusoidal force trials across all combinations of
+    (period_ms, num_cycles, start_pos_um, force_amp_mN), each repeated
+    iters_per_combo times.  Saves everything into one master .npz file.
+    """
+    if periods_ms is None:
+        periods_ms = SINUSOID_PERIODS_MS
+    if num_cycles_list is None:
+        num_cycles_list = SINUSOID_NUM_CYCLES
+    if start_positions_um is None:
+        start_positions_um = SINUSOID_START_POSITIONS_UM
+    if force_amplitudes_mN is None:
+        force_amplitudes_mN = SINUSOID_FORCE_AMPLITUDES_MN
+
+    for amp in force_amplitudes_mN:
+        if abs(amp) > FORCE_SAFETY_LIMIT_MN:
+            raise ValueError(f"Force amplitude {amp} mN exceeds safety limit "
+                             f"of {FORCE_SAFETY_LIMIT_MN} mN")
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    combos = [(p, nc, sp, fa)
+              for p in periods_ms
+              for nc in num_cycles_list
+              for sp in start_positions_um
+              for fa in force_amplitudes_mN]
+
+    total_trials = len(combos) * iters_per_combo
+    print(f"\nSinusoid: {len(combos)} combos x "
+          f"{iters_per_combo} iters = {total_trials} trials")
+
+    all_t_stream = []
+    all_position_um = []
+    all_force_mN = []
+    all_t_accel = []
+    all_accel_mmpss = []
+    all_force_commanded_mN = []
+
+    trial_n_samples = []
+    trial_period_ms = []
+    trial_num_cycles = []
+    trial_start_position_um = []
+    trial_force_amp_mN = []
+    trial_hit_limit = []
+
+    motor.set_mode(MotorMode.SleepMode)
+    motor.clear_errors()
+    motor.enable_stream()
+
+    trial_num = 0
+
+    try:
+        for period, nc, start_pos, amp in combos:
+            for iteration in range(iters_per_combo):
+                trial_num += 1
+                print(f"\n--- Sinusoid trial {trial_num}/{total_trials}: "
+                      f"period={period} ms, cycles={nc}, "
+                      f"start={start_pos} um, amp={amp} mN, "
+                      f"iter={iteration+1}/{iters_per_combo} ---")
+
+                print("  Auto-zeroing...")
+                error = auto_zero_motor(motor)
+                if error.value != 0:
+                    print(f"  WARNING: Auto-zero returned error "
+                          f"{error.value}, skipping.")
+                    continue
+
+                motor.enable_stream()
+                time.sleep(0.3)
+
+                trial_data = run_sinusoid_trial(
+                    motor, period, nc, start_pos, amp
+                )
+
+                n_samples = len(trial_data["t_stream"])
+                print(f"  Recorded {n_samples} samples, "
+                      f"position range: {trial_data['position_um'][0]} - "
+                      f"{trial_data['position_um'][-1]} um"
+                      f"{' (HIT LIMIT)' if trial_data['hit_limit'] else ''}")
+
+                all_t_stream.append(trial_data["t_stream"])
+                all_position_um.append(trial_data["position_um"])
+                all_force_mN.append(trial_data["force_mN"])
+                all_t_accel.append(trial_data["t_accel"])
+                all_accel_mmpss.append(trial_data["accel_mmpss"])
+                all_force_commanded_mN.append(trial_data["force_commanded_mN"])
+
+                trial_n_samples.append(n_samples)
+                trial_period_ms.append(period)
+                trial_num_cycles.append(nc)
+                trial_start_position_um.append(start_pos)
+                trial_force_amp_mN.append(amp)
+                trial_hit_limit.append(trial_data["hit_limit"])
+
+                time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user.")
+    except Exception as e:
+        print(f"\nError during collection: {e}")
+        raise
+    finally:
+        motor.set_mode(MotorMode.SleepMode)
+
+    filepath = os.path.join(DATA_DIR, "calibration_sinusoid_friction.npz")
+
+    trial_n_samples_arr = np.array(trial_n_samples, dtype=np.int32)
+    trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples_arr)])
+
+    np.savez(
+        filepath,
+        # Metadata
+        procedure_type="sinusoid",
+        mass_shaft_kg=PARAMS["mass_shaft_kg"],
+        motor_min_um=MOTOR_MIN_UM,
+        motor_max_um=MOTOR_MAX_UM,
+        experiment_min_pos_um=PARAMS["experiment_min_pos_um"],
+        experiment_max_pos_um=EXPERIMENT_MAX_POS_UM,
+        force_levels_mN=np.array(force_amplitudes_mN, dtype=np.int32),
+        n_trials=len(trial_n_samples),
+        # Per-trial arrays
+        trial_period_ms=np.array(trial_period_ms, dtype=np.int32),
+        trial_num_cycles=np.array(trial_num_cycles, dtype=np.int32),
+        trial_start_position_um=np.array(trial_start_position_um, dtype=np.int32),
+        trial_force_amp_mN=np.array(trial_force_amp_mN, dtype=np.int32),
+        trial_hit_limit=np.array(trial_hit_limit, dtype=bool),
+        trial_n_samples=trial_n_samples_arr,
+        trial_boundaries=trial_boundaries,
+        # Concatenated per-sample arrays
+        t_stream=np.concatenate(all_t_stream) if all_t_stream else np.array([], dtype=np.float64),
+        position_um=np.concatenate(all_position_um) if all_position_um else np.array([], dtype=np.int32),
+        force_mN=np.concatenate(all_force_mN) if all_force_mN else np.array([], dtype=np.int32),
+        force_commanded_mN=np.concatenate(all_force_commanded_mN) if all_force_commanded_mN else np.array([], dtype=np.int32),
+        t_accel=np.concatenate(all_t_accel) if all_t_accel else np.array([], dtype=np.float64),
+        accel_mmpss=np.concatenate(all_accel_mmpss) if all_accel_mmpss else np.array([], dtype=np.int32),
+    )
+    print(f"\nSaved sinusoid data file: {filepath}")
+    print(f"Total trials: {len(trial_n_samples)}/{total_trials}")
+    print(f"Total samples: {sum(trial_n_samples)}")
+
+    return trial_n_samples
+
 
 # ---------------------------------------------------------------------------
 # Static friction estimation
@@ -894,8 +1131,9 @@ def main():
     print(f"  2) Static friction estimation (force ramp)")
     print(f"  3) Both (static first, then dynamic)")
     print(f"  4) Ramp-down (low-force / coasting friction from running start)")
-    print(f"  5) All (static, then dynamic, then ramp-down)")
-    procedure = input("Select procedure [1/2/3/4/5]: ").strip() or "1"
+    print(f"  5) All (static, then dynamic, then ramp-down, then sinusoidal)")
+    print(f"  6) Sinusoidal force trajectories")
+    procedure = input("Select procedure [1/2/3/4/5/6]: ").strip() or "1"
 
     input("\nPress Enter to begin data collection...")
 
@@ -906,6 +1144,8 @@ def main():
             collect_data(motor)
         if procedure in ("4", "5"):
             collect_rampdown_data(motor)
+        if procedure in ("5", "6"):
+            collect_sinusoid_data(motor)
     finally:
         print("\nShutting down motor...")
         try:

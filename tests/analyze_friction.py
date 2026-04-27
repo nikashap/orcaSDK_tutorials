@@ -77,12 +77,14 @@ RAMPDOWN_MIN_TRAVEL_UM = PARAMS.get("rampdown_min_travel_um", 2540)
 def load_master_data(filepath):
     """Load a master .npz file and split into per-trial dicts.
 
-    Handles both constant-force data (calibration_dynamic_friction.npz) and
-    ramp-down data (calibration_rampdown_friction.npz).  In both cases,
+    Handles constant-force data (calibration_dynamic_friction.npz),
+    ramp-down data (calibration_rampdown_friction.npz), and sinusoidal
+    data (calibration_sinusoid_friction.npz).  In all cases,
     force_commanded_mN is returned as a per-sample array.  A scalar
     force_label_mN is also included for grouping / plotting:
       - constant-force trials: the commanded force level
       - ramp-down trials: the target (post-switch) force
+      - sinusoid trials: the force amplitude
     """
     data = np.load(filepath, allow_pickle=True)
 
@@ -96,6 +98,7 @@ def load_master_data(filepath):
         procedure_type = "constant"
 
     is_rampdown = (procedure_type == "rampdown")
+    is_sinusoid = (procedure_type == "sinusoid")
 
     t_stream_all = data["t_stream"]
     position_um_all = data["position_um"]
@@ -107,6 +110,9 @@ def load_master_data(filepath):
         force_cmd_all = data["force_commanded_mN"]
         trial_labels = data["trial_target_force_mN"]
         trial_switch_indices = data["trial_switch_index"]
+    elif is_sinusoid:
+        force_cmd_all = data["force_commanded_mN"]
+        trial_labels = data["trial_force_amp_mN"]
     else:
         force_cmd_all = (data["force_commanded_mN"] if "force_commanded_mN" in data
                          else None)
@@ -121,6 +127,9 @@ def load_master_data(filepath):
             if switch_idx < 0:
                 continue
             lo = lo + switch_idx
+            force_cmd = force_cmd_all[lo:hi].astype(np.float64)
+            label = int(trial_labels[i])
+        elif is_sinusoid:
             force_cmd = force_cmd_all[lo:hi].astype(np.float64)
             label = int(trial_labels[i])
         elif force_cmd_all is not None:
@@ -147,7 +156,7 @@ def load_master_data(filepath):
             "accel_mmpss": accel_mmpss_all[lo:hi].astype(np.float64),
         }
 
-    if is_rampdown:
+    if is_rampdown or is_sinusoid:
         force_levels = sorted(set(int(trial_labels[i]) for i in range(n_trials)))
     else:
         force_levels = data["force_levels_mN"].tolist()
@@ -712,14 +721,16 @@ def save_augmented_data(experiment_dir, friction_trials, metadata,
 # ---------------------------------------------------------------------------
 
 def main():
-    # Locate data files — load constant-force and/or ramp-down
+    # Locate data files — load constant-force, ramp-down, and/or sinusoidal
     const_path = os.path.join(EXPERIMENT_DIR, "calibration_dynamic_friction.npz")
     rampdown_path = os.path.join(EXPERIMENT_DIR, "calibration_rampdown_friction.npz")
+    sinusoid_path = os.path.join(EXPERIMENT_DIR, "calibration_sinusoid_friction.npz")
 
     if _args.data:
         data_paths = [_args.data]
     else:
-        data_paths = [p for p in [const_path, rampdown_path] if os.path.exists(p)]
+        data_paths = [p for p in [const_path, rampdown_path, sinusoid_path]
+                      if os.path.exists(p)]
 
     if not data_paths:
         print(f"ERROR: No data files found in {EXPERIMENT_DIR}")
@@ -810,29 +821,29 @@ def main():
     fig_accel.savefig(accel_path, dpi=150)
     print(f"  Saved: {accel_path}")
 
-    # --- Plot 4: Stribeck curve ---
-    print("Generating Stribeck curve (velocity vs coefficient)...")
-    fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
-    stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
-    fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {stribeck_path}")
+    # # --- Plot 4: Stribeck curve ---
+    # print("Generating Stribeck curve (velocity vs coefficient)...")
+    # fig_stribeck = plot_stribeck_curve(friction_trials, force_levels)
+    # stribeck_path = os.path.join(EXPERIMENT_DIR, "stribeck_curve.png")
+    # fig_stribeck.savefig(stribeck_path, dpi=150, bbox_inches="tight")
+    # print(f"  Saved: {stribeck_path}")
 
-    # --- Plot 5: 3D Stribeck (position, velocity, μ_d) ---
-    print("Generating 3D Stribeck plot (position, velocity, μ_d)...")
-    print("  NOTE: Position and velocity values are NOT shifted by the "
-          f"stream_force_shift={STREAM_FORCE_SHIFT} parameter. "
-          "Only force_sensed is shifted to align with acceleration.")
-    fig_3d = plot_stribeck_3d(friction_trials, force_levels)
-    stribeck_3d_path = os.path.join(EXPERIMENT_DIR, "stribeck_3d.png")
-    fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {stribeck_3d_path}")
+    # # --- Plot 5: 3D Stribeck (position, velocity, μ_d) ---
+    # print("Generating 3D Stribeck plot (position, velocity, μ_d)...")
+    # print("  NOTE: Position and velocity values are NOT shifted by the "
+    #       f"stream_force_shift={STREAM_FORCE_SHIFT} parameter. "
+    #       "Only force_sensed is shifted to align with acceleration.")
+    # fig_3d = plot_stribeck_3d(friction_trials, force_levels)
+    # stribeck_3d_path = os.path.join(EXPERIMENT_DIR, "stribeck_3d.png")
+    # fig_3d.savefig(stribeck_3d_path, dpi=150, bbox_inches="tight")
+    # print(f"  Saved: {stribeck_3d_path}")
 
-    # --- Plot 6: Faux Stribeck with position vs mu_d ---
-    print("Generating Faux Stribeck plot (position, mu_d)")
-    fig_faux = plot_position_vs_mud_curve(friction_trials, force_levels)
-    faux_path = os.path.join(EXPERIMENT_DIR, "faux_stribeck.png")
-    fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {faux_path}")
+    # # --- Plot 6: Faux Stribeck with position vs mu_d ---
+    # print("Generating Faux Stribeck plot (position, mu_d)")
+    # fig_faux = plot_position_vs_mud_curve(friction_trials, force_levels)
+    # faux_path = os.path.join(EXPERIMENT_DIR, "faux_stribeck.png")
+    # fig_faux.savefig(faux_path, dpi=150, bbox_inches="tight")
+    # print(f"  Saved: {faux_path}")
 
     # --- Plot 7: Realized vs sensed force 3D ---
     print("Generating realized vs sensed force 3D plots...")

@@ -146,6 +146,20 @@ rampdown_starting_positions_um: [     # starting positions for the shaft before 
 rampdown_iterations_per_combo: 3      # trials per (target_force, switch_position, starting_position) combo
 
 # ---------------------------------------------------------------------------
+# Sinusoidal force trajectories
+# ---------------------------------------------------------------------------
+# Command a sinusoidal force profile F(t) = amplitude * sin(2*pi*t/period)
+# to capture direction-reversal friction dynamics.  Each combination of
+# (period, num_cycles, start_position, force_amplitude) is run
+# iters_per_combo times.
+sinusoid:
+  periods_ms: [500, 1000, 2000]          # sine wave period (milliseconds)
+  num_cycles: [5]                     # full cycles per trial
+  start_positions_um: [170000, 220000, 270000, 320000, 370000]  # shaft starting position per trial
+  force_amplitudes_mN: [7000, 8500, 10000, 12500, 15000, 17500, 20000]     # peak force amplitude (wave spans +/- this value)
+  iters_per_combo: 1                     # repetitions per parameter combination
+
+# ---------------------------------------------------------------------------
 # Data output
 # ---------------------------------------------------------------------------
 data_dir: "../data"
