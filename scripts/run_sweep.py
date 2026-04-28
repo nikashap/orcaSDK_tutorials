@@ -52,19 +52,20 @@ def generate_slurm_script(sweep_dir, n_trials, scripts_dir, scratch_dir,
     """Generate a Slurm array job script for MIT Engaging."""
     return f"""#!/bin/bash
 #SBATCH --job-name=friction_sweep
-#SBATCH --array=1-{n_trials}%50
+#SBATCH --array=1-{n_trials}%2
 #SBATCH --output={sweep_dir}/logs/run_%a.out
 #SBATCH --error={sweep_dir}/logs/run_%a.err
 #SBATCH --time=00:30:00
 #SBATCH --mem=4G
 #SBATCH -c 2
-#SBATCH -p mit_normal
+#SBATCH -p mit_normal_gpu
+#SBATCH --gres=gpu:1
 
 # Environment setup (do NOT use conda init; load module instead)
 module load miniforge
 source activate orca_test_env
 
-# Pin thread count to allocated cores
+# Pin CPU thread count to allocated cores
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
@@ -98,13 +99,14 @@ def generate_test_script(sweep_dir, scripts_dir, scratch_dir, dataset_source):
 #SBATCH --time=00:30:00
 #SBATCH --mem=4G
 #SBATCH -c 2
-#SBATCH -p mit_normal
+#SBATCH -p mit_normal_gpu
+#SBATCH --gres=gpu:1
 
 # Environment setup
 module load miniforge
 source activate orca_test_env
 
-# Pin thread count to allocated cores
+# Pin CPU thread count to allocated cores
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 

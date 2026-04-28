@@ -24,7 +24,7 @@ sweep_dir: "/orcd/data/mjaz/001/nikashap/models/friction/sweeps"
 search_space:
   model_variant:
     type: categorical
-    values: [1, 2]
+    values: [2]
 
   learning_rate:
     type: log_uniform
