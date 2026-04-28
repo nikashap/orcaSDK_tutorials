@@ -10,7 +10,8 @@ n_trials: 200
 base_config: "train_config.yaml"
 
 # Where to save sweep configs and results (relative to repo root, or absolute)
-sweep_dir: "models/friction/sweeps"
+# sweep_dir: "models/friction/sweeps"
+sweep_dir: "/orcd/data/mjaz/001/nikashap/models/friction/sweeps"
 
 # ---------------------------------------------------------------------------
 # Search space

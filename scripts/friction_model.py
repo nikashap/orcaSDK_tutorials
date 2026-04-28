@@ -2,8 +2,7 @@
 friction_model.py
 
 PyTorch dataset and model for predicting force_mN_sensed_aligned from
-motor kinematic features.  Supports four model variants with increasing
-input dimensionality (see MODEL_VARIANTS).
+motor kinematic features. See MODEL_VARIANTS for what models are trained.
 
 Used by train_model.py.  Can also be imported at inference time
 in the real-time control loop.

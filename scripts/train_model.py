@@ -37,6 +37,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train friction MLP")
     p.add_argument("--config", type=str, default="train_config.yaml",
                    help="Path to training config YAML")
+    p.add_argument("--engaging", type=bool, default=True,
+                    help="True/False for whether running script in engaging")
     return p.parse_args()
 
 
@@ -100,7 +102,10 @@ def main():
         cfg = yaml.safe_load(f)
 
     # Resolve output_dir: absolute paths used as-is, relative joined with repo_root
-    output_dir = cfg["output_dir"]
+    if args.engaging:
+        output_dir = cfg["output_dir_engaging"]
+    else:
+        output_dir = cfg["output_dir"]
     if not os.path.isabs(output_dir):
         output_dir = os.path.join(repo_root, output_dir)
 
