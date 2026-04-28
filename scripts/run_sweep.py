@@ -47,7 +47,8 @@ def sample_value(spec, rng):
         raise ValueError(f"Unknown search space type: {stype}")
 
 
-def generate_slurm_script(sweep_dir, n_trials, scripts_dir, dataset_path):
+def generate_slurm_script(sweep_dir, n_trials, scripts_dir, scratch_dir,
+                          dataset_source):
     """Generate a Slurm array job script for MIT Engaging."""
     return f"""#!/bin/bash
 #SBATCH --job-name=friction_sweep
@@ -58,20 +59,67 @@ def generate_slurm_script(sweep_dir, n_trials, scripts_dir, dataset_path):
 #SBATCH --mem=4G
 #SBATCH -c 2
 #SBATCH -p mit_normal
-# For GPU jobs, change to:
-#   #SBATCH -p mit_normal_gpu
-#   #SBATCH -G l40s:1
 
 # Environment setup (do NOT use conda init; load module instead)
 module load miniforge
 source activate orca_test_env
+
+# Copy dataset to scratch (flash) if not already there.
+# flock prevents race conditions when multiple array tasks start simultaneously.
+SCRATCH_DATASET="{scratch_dir}/friction_dataset.npz"
+mkdir -p "{scratch_dir}"
+flock -n "{scratch_dir}/.copy.lock" -c '
+    if [ ! -f "{scratch_dir}/friction_dataset.npz" ] || \\
+       [ "{dataset_source}" -nt "{scratch_dir}/friction_dataset.npz" ]; then
+        echo "Copying dataset to scratch..."
+        cp "{dataset_source}" "{scratch_dir}/friction_dataset.npz"
+    fi
+'
 
 # Run the trial matching this array task ID
 RUN_ID=$(printf "%03d" $SLURM_ARRAY_TASK_ID)
 CONFIG="{sweep_dir}/configs/run_${{RUN_ID}}.yaml"
 
 cd {scripts_dir}
-python train_model.py --config "$CONFIG"
+python train_model.py --config "$CONFIG" --engaging
+"""
+
+
+def generate_test_script(sweep_dir, scripts_dir, scratch_dir, dataset_source):
+    """Generate a single-job test script for profiling resource usage."""
+    return f"""#!/bin/bash
+#SBATCH --job-name=friction_test
+#SBATCH --output={sweep_dir}/logs/test_run.out
+#SBATCH --error={sweep_dir}/logs/test_run.err
+#SBATCH --time=00:30:00
+#SBATCH --mem=4G
+#SBATCH -c 2
+#SBATCH -p mit_normal
+
+# Environment setup
+module load miniforge
+source activate orca_test_env
+
+# Copy dataset to scratch
+SCRATCH_DATASET="{scratch_dir}/friction_dataset.npz"
+mkdir -p "{scratch_dir}"
+if [ ! -f "$SCRATCH_DATASET" ] || [ "{dataset_source}" -nt "$SCRATCH_DATASET" ]; then
+    echo "Copying dataset to scratch..."
+    cp "{dataset_source}" "$SCRATCH_DATASET"
+fi
+
+# Run one config for profiling
+CONFIG="{sweep_dir}/configs/run_001.yaml"
+
+cd {scripts_dir}
+echo "=== Starting test run ==="
+echo "Start time: $(date)"
+python train_model.py --config "$CONFIG" --engaging
+echo "End time: $(date)"
+echo "=== Test run complete ==="
+echo ""
+echo "After this job finishes, check resource usage with:"
+echo "  jobstats $SLURM_JOB_ID"
 """
 
 
@@ -91,6 +139,13 @@ def main():
 
     n_trials = sweep_cfg["n_trials"]
     search_space = sweep_cfg["search_space"]
+
+    # Resolve scratch and dataset paths
+    scratch_dir = base_cfg.get("scratch_dir", "/home/nikashap/orcd/scratch/friction")
+    output_dir_engaging = base_cfg.get("output_dir_engaging",
+                                        base_cfg.get("output_dir", "models/friction"))
+    dataset_source = os.path.join(output_dir_engaging, "friction_dataset.npz")
+    scratch_dataset = os.path.join(scratch_dir, "friction_dataset.npz")
 
     # Resolve sweep directory
     sweep_dir = sweep_cfg["sweep_dir"]
@@ -120,9 +175,12 @@ def main():
             trial_cfg[name] = val
             overrides[name] = val
 
-        # Unique output directory per run
+        # Unique output directory per run; read dataset from scratch
         run_id = f"run_{i:03d}"
-        trial_cfg["output_dir"] = os.path.join(sweep_run_dir, "results", run_id)
+        run_output = os.path.join(sweep_run_dir, "results", run_id)
+        trial_cfg["output_dir"] = run_output
+        trial_cfg["output_dir_engaging"] = run_output
+        trial_cfg["dataset_path"] = scratch_dataset
 
         config_path = os.path.join(configs_dir, f"{run_id}.yaml")
         with open(config_path, "w") as f:
@@ -142,10 +200,9 @@ def main():
         yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
     print(f"Manifest saved to {manifest_path}")
 
-    # Generate Slurm script
-    dataset_path = base_cfg.get("dataset_path", "")
+    # Generate Slurm scripts
     slurm_script = generate_slurm_script(
-        sweep_run_dir, n_trials, script_dir, dataset_path
+        sweep_run_dir, n_trials, script_dir, scratch_dir, dataset_source
     )
     slurm_path = os.path.join(sweep_run_dir, "submit_sweep.sh")
     with open(slurm_path, "w") as f:
@@ -153,9 +210,28 @@ def main():
     os.chmod(slurm_path, 0o755)
     print(f"Slurm array script saved to {slurm_path}")
 
-    print(f"\nTo submit on Engaging:")
-    print(f"  cd {sweep_run_dir}")
-    print(f"  sbatch submit_sweep.sh")
+    test_script = generate_test_script(
+        sweep_run_dir, script_dir, scratch_dir, dataset_source
+    )
+    test_path = os.path.join(sweep_run_dir, "submit_test.sh")
+    with open(test_path, "w") as f:
+        f.write(test_script)
+    os.chmod(test_path, 0o755)
+    print(f"Slurm test script saved to {test_path}")
+
+    print(f"\nDataset will be copied from:")
+    print(f"  {dataset_source}")
+    print(f"to scratch:")
+    print(f"  {scratch_dataset}")
+
+    print(f"\nStep 1 — Profile one run:")
+    print(f"  sbatch {test_path}")
+    print(f"  # After it finishes, check resource usage:")
+    print(f"  jobstats <JOB_ID>")
+
+    print(f"\nStep 2 — Submit full sweep (after adjusting resources):")
+    print(f"  sbatch {slurm_path}")
+
     print(f"\nTo run one config locally (for testing):")
     print(f"  python train_model.py --config {configs_dir}/run_001.yaml")
 

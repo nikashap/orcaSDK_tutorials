@@ -85,3 +85,6 @@ output_dir: "models/friction"
 
 # Optional: override dataset directory to be outside of local repo (defaults to orcaSDK_tutorials/output_dir/friction_dataset.npz)
 output_dir_engaging: "/orcd/data/mjaz/001/nikashap/models/friction"
+
+# Scratch directory for active job I/O (flash storage, faster reads)
+scratch_dir: "/home/nikashap/orcd/scratch/friction"

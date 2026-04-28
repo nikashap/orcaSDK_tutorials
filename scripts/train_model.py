@@ -37,8 +37,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train friction MLP")
     p.add_argument("--config", type=str, default="train_config.yaml",
                    help="Path to training config YAML")
-    p.add_argument("--engaging", type=bool, default=True,
-                    help="True/False for whether running script in engaging")
+    p.add_argument("--engaging", action="store_true", default=False,
+                    help="Use Engaging cluster paths for output")
     return p.parse_args()
 
 

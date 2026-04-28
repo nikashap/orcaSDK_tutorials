@@ -28,8 +28,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Prepare friction training data")
     p.add_argument("--config", type=str, default="train_config.yaml",
                    help="Path to training config YAML")
-    p.add_argument("--engaging", type=bool, default=True,
-                    help="True/False for whether running script in engaging")
+    p.add_argument("--engaging", action="store_true", default=False,
+                    help="Use Engaging cluster paths for data and output")
     return p.parse_args()
 
 
@@ -436,10 +436,10 @@ def main():
     t_ignore_s = cfg.get("t_ignore_s_override", None)
 
     # Resolve data directories and YAML paths
-    # Uncomment below to use local path
-    # data_base = os.path.join(repo_root, "data")
-    # Uncomment below to use engaging path
-    data_base = "/orcd/data/mjaz/001/nikashap/calibration_data"
+    if args.engaging:
+        data_base = "/orcd/data/mjaz/001/nikashap/calibration_data"
+    else:
+        data_base = os.path.join(repo_root, "data")
     data_dirs = [os.path.join(data_base, d) for d in data_dates]
     yaml_paths = [os.path.join(d, "calibration_params.yaml") for d in data_dirs]
 
