@@ -4,7 +4,7 @@
 # Used by run_sweep.py to generate random training configurations.
 
 # Number of random configurations to generate
-n_trials: 200
+n_trials: 50
 
 # Base config — sweep overrides specific fields; everything else is inherited
 base_config: "train_config.yaml"

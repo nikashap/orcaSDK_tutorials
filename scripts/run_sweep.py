@@ -64,6 +64,7 @@ def generate_slurm_script(sweep_dir, n_trials, scripts_dir, scratch_dir,
 # Environment setup (do NOT use conda init; load module instead)
 module load miniforge
 source activate orca_test_env
+export LD_LIBRARY_PATH=/home/nikashap/.conda/envs/orca_test_env/lib:$LD_LIBRARY_PATH
 
 # Pin CPU thread count to allocated cores
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
