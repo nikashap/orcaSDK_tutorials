@@ -64,6 +64,10 @@ def generate_slurm_script(sweep_dir, n_trials, scripts_dir, scratch_dir,
 module load miniforge
 source activate orca_test_env
 
+# Pin thread count to allocated cores
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
 # Copy dataset to scratch (flash) if not already there.
 # flock prevents race conditions when multiple array tasks start simultaneously.
 SCRATCH_DATASET="{scratch_dir}/friction_dataset.npz"
@@ -81,7 +85,7 @@ RUN_ID=$(printf "%03d" $SLURM_ARRAY_TASK_ID)
 CONFIG="{sweep_dir}/configs/run_${{RUN_ID}}.yaml"
 
 cd {scripts_dir}
-python train_model.py --config "$CONFIG" --engaging
+python -u train_model.py --config "$CONFIG" --engaging
 """
 
 
@@ -100,6 +104,10 @@ def generate_test_script(sweep_dir, scripts_dir, scratch_dir, dataset_source):
 module load miniforge
 source activate orca_test_env
 
+# Pin thread count to allocated cores
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
 # Copy dataset to scratch
 SCRATCH_DATASET="{scratch_dir}/friction_dataset.npz"
 mkdir -p "{scratch_dir}"
@@ -114,7 +122,7 @@ CONFIG="{sweep_dir}/configs/run_001.yaml"
 cd {scripts_dir}
 echo "=== Starting test run ==="
 echo "Start time: $(date)"
-python train_model.py --config "$CONFIG" --engaging
+python -u train_model.py --config "$CONFIG" --engaging
 echo "End time: $(date)"
 echo "=== Test run complete ==="
 echo ""
