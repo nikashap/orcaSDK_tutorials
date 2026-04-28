@@ -477,6 +477,18 @@ def main():
               f"[{MIN_POSITION_UM}, {MAX_POSITION_UM}] µm "
               f"({len(trial_ids)} remaining)")
 
+    # Exclude unrealistic velocity estimates (rolling window artifacts)
+    MAX_VELOCITY_MM_S = 1500.0
+    vel = samples["velocity_mm_s_aligned"]
+    vel_mask = np.abs(vel) <= MAX_VELOCITY_MM_S
+    n_vel_excluded = int(np.sum(~vel_mask))
+    if n_vel_excluded > 0:
+        samples = {k: v[vel_mask] for k, v in samples.items()}
+        trial_ids = trial_ids[vel_mask]
+        print(f"Velocity filter: excluded {n_vel_excluded} samples with "
+              f"|velocity| > {MAX_VELOCITY_MM_S} mm/s "
+              f"({len(trial_ids)} remaining)")
+
     # Split
     print(f"\nSplitting by trial: "
           f"train={train_ratio}, val={val_ratio}, test={test_ratio}, seed={seed}")
