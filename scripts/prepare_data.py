@@ -28,6 +28,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Prepare friction training data")
     p.add_argument("--config", type=str, default="train_config.yaml",
                    help="Path to training config YAML")
+    p.add_argument("--engaging", type=bool, default=True,
+                    help="True/False for whether running script in engaging")
     return p.parse_args()
 
 
@@ -434,7 +436,10 @@ def main():
     t_ignore_s = cfg.get("t_ignore_s_override", None)
 
     # Resolve data directories and YAML paths
-    data_base = os.path.join(repo_root, "data")
+    # Uncomment below to use local path
+    # data_base = os.path.join(repo_root, "data")
+    # Uncomment below to use engaging path
+    data_base = "/orcd/data/mjaz/001/nikashap/calibration_data"
     data_dirs = [os.path.join(data_base, d) for d in data_dates]
     yaml_paths = [os.path.join(d, "calibration_params.yaml") for d in data_dirs]
 
@@ -489,7 +494,10 @@ def main():
         print(f"  {k}: {v:.6f}")
 
     # Save
-    output_dir = os.path.join(repo_root, cfg["output_dir"])
+    if not args.engaging:
+        output_dir = os.path.join(repo_root, cfg["output_dir"])
+    else:
+        output_dir = cfg["output_dir_engaging"]
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "friction_dataset.npz")
 

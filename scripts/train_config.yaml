@@ -83,5 +83,5 @@ early_stopping_patience: 50  # stop if val loss doesn't improve for N epochs (0 
 # Absolute paths (e.g. /orcd/data/...) are used as-is.
 output_dir: "models/friction"
 
-# Optional: override dataset location (defaults to output_dir/friction_dataset.npz)
-# dataset_path: "/orcd/data/mjaz/001/nikashap/models/friction/friction_dataset.npz"
+# Optional: override dataset directory to be outside of local repo (defaults to orcaSDK_tutorials/output_dir/friction_dataset.npz)
+output_dir_engaging: "/orcd/data/mjaz/001/nikashap/models/friction"
