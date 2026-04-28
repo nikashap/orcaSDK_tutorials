@@ -28,7 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import yaml
 
-from friction_model import FrictionDataset, FrictionMLP, MODEL_VARIANTS
+from friction_model import FrictionDataset, FrictionMLP, MODEL_VARIANTS, TARGET_KEY
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -260,7 +260,10 @@ def main():
     # Evaluate on test set
     model.load_state_dict(best_state)
     test_loss = evaluate(model, test_loader, criterion, device)
-    print(f"Test MSE: {test_loss:.6f}  (RMSE: {test_loss**0.5:.6f})")
+    target_std = train_ds.norm_stats[TARGET_KEY]["std"]
+    test_rmse_mN = (test_loss ** 0.5) * target_std
+    print(f"Test MSE (normalized): {test_loss:.6f}  "
+          f"(RMSE in mN: {test_rmse_mN:.2f})")
 
     # Training curves
     curves_path = os.path.join(output_dir, "training_curves.png")
@@ -287,7 +290,7 @@ def main():
         "train_mse": float(train_losses[best_epoch - 1]),
         "val_mse": float(best_val_loss),
         "test_mse": float(test_loss),
-        "test_rmse_mN": float(test_loss ** 0.5),
+        "test_rmse_mN": float(test_rmse_mN),
         "train_time_s": round(train_time_s, 1),
     }
     metrics_path = os.path.join(output_dir, "metrics.yaml")

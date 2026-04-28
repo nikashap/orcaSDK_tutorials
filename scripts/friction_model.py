@@ -74,13 +74,17 @@ class FrictionDataset(Dataset):
             self.norm_stats[key] = {"mean": mean, "std": std}
 
         self.X = torch.from_numpy(np.column_stack(raw_inputs))
-        self.y = torch.from_numpy(
-            d[f"{split}_{TARGET_KEY}"].astype(np.float32)
-        )
+
+        target_arr = d[f"{split}_{TARGET_KEY}"].astype(np.float32)
+        target_mean = float(d[f"{TARGET_KEY}_mean"])
+        target_std = float(d[f"{TARGET_KEY}_std"])
+        if target_std < 1e-12:
+            target_std = 1.0
+        self.y = torch.from_numpy((target_arr - target_mean) / target_std)
 
         self.norm_stats[TARGET_KEY] = {
-            "mean": float(d[f"{TARGET_KEY}_mean"]),
-            "std": float(d[f"{TARGET_KEY}_std"]),
+            "mean": target_mean,
+            "std": target_std,
         }
         self.n_inputs = len(self.input_keys)
 

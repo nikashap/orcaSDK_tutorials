@@ -28,28 +28,25 @@ search_space:
 
   learning_rate:
     type: log_uniform
-    low: 1.0e-4
-    high: 1.0e-2
+    low: 1.0e-3
+    high: 1.0e-1
 
   hidden_dims:
     type: categorical
     values:
       - [32, 32]
-      - [64, 64]
-      - [128, 128]
       - [64, 32]
+      - [64, 64]
       - [128, 64]
       - [128, 64, 32]
-      - [256, 128]
-      - [256, 128, 64]
 
   activation:
     type: categorical
-    values: ["relu", "tanh", "leaky_relu", "gelu", "elu"]
+    values: ["relu", "leaky_relu", "gelu"]
 
   batch_size:
     type: categorical
-    values: [128, 256, 512, 1024]
+    values: [512, 1024, 2048, 4096]
 
   weight_decay:
     type: log_uniform
@@ -58,4 +55,4 @@ search_space:
 
   dropout:
     type: categorical
-    values: [0.0, 0.05, 0.1, 0.2]
+    values: [0.0]

@@ -52,14 +52,13 @@ def generate_slurm_script(sweep_dir, n_trials, scripts_dir, scratch_dir,
     """Generate a Slurm array job script for MIT Engaging."""
     return f"""#!/bin/bash
 #SBATCH --job-name=friction_sweep
-#SBATCH --array=1-{n_trials}%2
+#SBATCH --array=1-{n_trials}%25
 #SBATCH --output={sweep_dir}/logs/run_%a.out
 #SBATCH --error={sweep_dir}/logs/run_%a.err
-#SBATCH --time=00:30:00
-#SBATCH --mem=4G
-#SBATCH -c 2
-#SBATCH -p mit_normal_gpu
-#SBATCH --gres=gpu:1
+#SBATCH --time=01:00:00
+#SBATCH --mem=2G
+#SBATCH -c 1
+#SBATCH -p mit_normal
 
 # Environment setup (do NOT use conda init; load module instead)
 module load miniforge
@@ -97,11 +96,10 @@ def generate_test_script(sweep_dir, scripts_dir, scratch_dir, dataset_source):
 #SBATCH --job-name=friction_test
 #SBATCH --output={sweep_dir}/logs/test_run.out
 #SBATCH --error={sweep_dir}/logs/test_run.err
-#SBATCH --time=00:30:00
-#SBATCH --mem=4G
-#SBATCH -c 2
-#SBATCH -p mit_normal_gpu
-#SBATCH --gres=gpu:1
+#SBATCH --time=01:00:00
+#SBATCH --mem=2G
+#SBATCH -c 1
+#SBATCH -p mit_normal
 
 # Environment setup
 module load miniforge
