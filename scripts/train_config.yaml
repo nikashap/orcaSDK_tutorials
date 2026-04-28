@@ -34,6 +34,7 @@ data_dates:
  - "26_04_24-17_06_58"
  - "26_04_26-16_21_44"
  - "26_04_26-18_27_02"
+ - "26_04_27-14_52_55"
 
 
 # Train / validation / test split ratios (by trial, not by sample).
