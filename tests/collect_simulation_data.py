@@ -138,6 +138,13 @@ def read_raw_acceleration(motor):
     )
     return accel_data.value
 
+def read_raw_velocity(motor):
+    """Read shaft velocity (blocking call). Returns value in mm/s"""
+    speed_data = motor.read_wide_register_blocking(
+        reg_address=orca_reg.SHAFT_SPEED_MMPS
+    )
+    return speed_data.value
+
 
 def advance_motor_stream(motor, frames=4, sleeptime=0.002):
     """Run through the motor command stream to clear any potentially stale frames."""
@@ -407,6 +414,8 @@ def run_simulation_trial(motor, trajectory):
     force_list = []
     t_accel_list = []
     accel_list = []
+    t_vel_list = []
+    vel_list = []
     force_cmd_list = []
 
     # Corresponding sim values at each motor step
@@ -435,11 +444,16 @@ def run_simulation_trial(motor, trajectory):
         accel_mmpss = read_raw_acceleration(motor)
         t2 = time.perf_counter()
 
+        vel_mm_s = read_raw_velocity(motor)
+        t3 = time.perf_counter()
+
         t_stream_list.append(t1)
         position_list.append(pos_um)
         force_list.append(force_mN)
         t_accel_list.append(t2)
         accel_list.append(accel_mmpss)
+        t_vel_list.append(t3)
+        vel_list.append(vel_mm_s)
         force_cmd_list.append(F_cmd_clamped)
 
         # Store corresponding simulation cart state at this timestep
@@ -479,6 +493,8 @@ def run_simulation_trial(motor, trajectory):
         "force_mN": np.array(force_list, dtype=np.int32),
         "t_accel": np.array(t_accel_list, dtype=np.float64),
         "accel_mmpss": np.array(accel_list, dtype=np.int32),
+        "t_vel": np.array(t_vel_list, dtype=np.float64),
+        "vel_mm_s": np.array(vel_list, dtype=np.int32),
         "force_commanded_mN": np.array(force_cmd_list, dtype=np.int32),
         # Corresponding simulation cart state (same units as motor data)
         "sim_position_um": np.array(sim_position_um_list, dtype=np.float64),

@@ -108,6 +108,8 @@ def load_shaft_data(filepath):
             "force_mN_sensed": d["force_mN"][lo:hi].astype(np.float64),
             "accel_mmpss": d["accel_mmpss"][lo:hi].astype(np.float64),
             "force_commanded_mN": d["force_commanded_mN"][lo:hi].astype(np.float64),
+            "t_vel_s": d["t_vel"][lo:hi].astype(np.float64) - t0,
+            "vel_mm_s":d["vel_mm_s"][lo:hi].astype(np.int32)
         })
 
     metadata = {
