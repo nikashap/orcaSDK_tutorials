@@ -34,7 +34,7 @@ import gymnasium as gym
 import mujoco
 import cartpole_target as ct_gym  # registers HardwareEnv-v0
 
-XML_FILEPATH = '/Users/Nikasha/Documents/GitHub/cartpole-target/orca/cartpendulum-orca.xml'
+XML_FILEPATH = '~/Documents/nikashap/cartpole-target/orca/cartpendulum-orca.xml'
 # Change filepath if on lab machine
 
 # ---------------------------------------------------------------------------
@@ -382,14 +382,23 @@ def run_simulation_trial(motor, trajectory):
     """Replay one pre-computed force trajectory on the motor.
 
     Commands each force value in sequence while recording the motor's
-    position, force_sensed, and acceleration.  Stops early if the shaft
-    approaches motor limits.
+    position, force_sensed, and acceleration.  Also records the
+    corresponding simulated cart state (position, velocity, acceleration)
+    for later trajectory deviation analysis.
+
+    Stops early if the shaft approaches motor limits.
 
     Returns dict with per-sample arrays matching collect_calibration_data.py
-    output format.
+    output format, plus sim_* arrays for comparison.
     """
     start_pos_um = trajectory["start_position_um"]
     force_commands = trajectory["force_commands_mN"]
+    sim_timestep_s = trajectory["sim_timestep_s"]
+
+    # Pre-computed simulation trajectory arrays (one per sim step)
+    sim_cart_x_arr = trajectory["sim_cart_x"]
+    sim_cart_xdot_arr = trajectory["sim_cart_xdot"]
+    sim_cart_xddot_arr = trajectory["sim_cart_xddot"]
 
     move_to_position(motor, target_pos_um=start_pos_um)
 
@@ -399,6 +408,11 @@ def run_simulation_trial(motor, trajectory):
     t_accel_list = []
     accel_list = []
     force_cmd_list = []
+
+    # Corresponding sim values at each motor step
+    sim_position_um_list = []
+    sim_velocity_mm_s_list = []
+    sim_accel_mmpss_list = []
 
     motor.set_mode(MotorMode.ForceMode)
 
@@ -428,6 +442,20 @@ def run_simulation_trial(motor, trajectory):
         accel_list.append(accel_mmpss)
         force_cmd_list.append(F_cmd_clamped)
 
+        # Store corresponding simulation cart state at this timestep
+        # sim_cart_x is in metres; convert to µm for direct comparison with motor
+        sim_position_um_list.append(
+            sim_cart_x_arr[i] * 1e6 + MOTOR_CENTER_UM
+        )
+        # sim_cart_xdot is in m/s; convert to mm/s for comparison
+        sim_velocity_mm_s_list.append(
+            sim_cart_xdot_arr[i] * 1e3
+        )
+        # sim_cart_xddot is in m/s²; convert to mm/s² for comparison
+        sim_accel_mmpss_list.append(
+            sim_cart_xddot_arr[i] * 1e3
+        )
+
         if pos_um <= safe_min or pos_um >= safe_max:
             print(f"    Hit safety limit at position {pos_um} um "
                   f"(step {i}/{len(force_commands)})")
@@ -445,12 +473,17 @@ def run_simulation_trial(motor, trajectory):
     motor.set_mode(MotorMode.SleepMode)
 
     return {
+        # Motor measured data
         "t_stream": np.array(t_stream_list, dtype=np.float64),
         "position_um": np.array(position_list, dtype=np.int32),
         "force_mN": np.array(force_list, dtype=np.int32),
         "t_accel": np.array(t_accel_list, dtype=np.float64),
         "accel_mmpss": np.array(accel_list, dtype=np.int32),
         "force_commanded_mN": np.array(force_cmd_list, dtype=np.int32),
+        # Corresponding simulation cart state (same units as motor data)
+        "sim_position_um": np.array(sim_position_um_list, dtype=np.float64),
+        "sim_velocity_mm_s": np.array(sim_velocity_mm_s_list, dtype=np.float64),
+        "sim_accel_mmpss": np.array(sim_accel_mmpss_list, dtype=np.float64),
     }
 
 
@@ -458,7 +491,9 @@ def collect_simulation_data(motor, trajectories):
     """Run all pre-computed trajectories on the motor and save data.
 
     Output npz has per-sample force_commanded_mN (same as rampdown/sinusoid
-    format) so analyze_friction.py can process it directly.
+    format) so analyze_friction.py can process it directly.  Also includes
+    sim_position_um, sim_velocity_mm_s, sim_accel_mmpss for trajectory
+    deviation analysis.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -468,6 +503,11 @@ def collect_simulation_data(motor, trajectories):
     all_t_accel = []
     all_accel_mmpss = []
     all_force_commanded_mN = []
+
+    # Simulation reference trajectory arrays
+    all_sim_position_um = []
+    all_sim_velocity_mm_s = []
+    all_sim_accel_mmpss = []
 
     trial_n_samples = []
     trial_theta_init = []
@@ -510,9 +550,14 @@ def collect_simulation_data(motor, trajectories):
                 print(f"  WARNING: No samples recorded, skipping.")
                 continue
 
+            # Compute deviation statistics for this trial
+            pos_dev = trial_data["position_um"].astype(np.float64) - trial_data["sim_position_um"]
+            pos_rmse = np.sqrt(np.mean(pos_dev ** 2))
+
             print(f"  Recorded {n_samples}/{n_steps} samples, "
                   f"position range: {trial_data['position_um'][0]} - "
-                  f"{trial_data['position_um'][-1]} um")
+                  f"{trial_data['position_um'][-1]} um, "
+                  f"pos RMSE vs sim: {pos_rmse:.0f} um")
 
             all_t_stream.append(trial_data["t_stream"])
             all_position_um.append(trial_data["position_um"])
@@ -520,6 +565,10 @@ def collect_simulation_data(motor, trajectories):
             all_t_accel.append(trial_data["t_accel"])
             all_accel_mmpss.append(trial_data["accel_mmpss"])
             all_force_commanded_mN.append(trial_data["force_commanded_mN"])
+
+            all_sim_position_um.append(trial_data["sim_position_um"])
+            all_sim_velocity_mm_s.append(trial_data["sim_velocity_mm_s"])
+            all_sim_accel_mmpss.append(trial_data["sim_accel_mmpss"])
 
             trial_n_samples.append(n_samples)
             trial_theta_init.append(theta)
@@ -557,23 +606,38 @@ def collect_simulation_data(motor, trajectories):
         sim_mass_cart=SIM_PARAMS["mass_cart"],
         sim_mass_bob=SIM_PARAMS["mass_bob"],
         sim_pendulum_length=SIM_PARAMS["pendulum_length"],
+        sim_timestep_s=trajectories[0]["sim_timestep_s"],
         n_trials=len(trial_n_samples),
         # Per-trial arrays
         trial_theta_init=np.array(trial_theta_init, dtype=np.float64),
         trial_start_position_um=np.array(trial_start_position_um, dtype=np.int32),
         trial_n_samples=trial_n_samples_arr,
         trial_boundaries=trial_boundaries,
-        # Concatenated per-sample arrays
+        # Concatenated per-sample arrays — motor measured
         t_stream=np.concatenate(all_t_stream),
         position_um=np.concatenate(all_position_um),
         force_mN=np.concatenate(all_force_mN),
         force_commanded_mN=np.concatenate(all_force_commanded_mN),
         t_accel=np.concatenate(all_t_accel),
         accel_mmpss=np.concatenate(all_accel_mmpss),
+        # Concatenated per-sample arrays — simulation reference trajectory
+        sim_position_um=np.concatenate(all_sim_position_um),
+        sim_velocity_mm_s=np.concatenate(all_sim_velocity_mm_s),
+        sim_accel_mmpss=np.concatenate(all_sim_accel_mmpss),
     )
     print(f"\nSaved simulation data file: {filepath}")
     print(f"Total trials: {len(trial_n_samples)}/{total_trials}")
     print(f"Total samples: {sum(trial_n_samples)}")
+
+    # Print summary deviation statistics across all trials
+    all_pos_motor = np.concatenate(all_position_um).astype(np.float64)
+    all_pos_sim = np.concatenate(all_sim_position_um)
+    pos_deviation = all_pos_motor - all_pos_sim
+    print(f"\nTrajectory deviation summary (motor - sim):")
+    print(f"  Position (µm):  mean={np.mean(pos_deviation):+.1f}, "
+          f"std={np.std(pos_deviation):.1f}, "
+          f"RMSE={np.sqrt(np.mean(pos_deviation**2)):.1f}, "
+          f"max|dev|={np.max(np.abs(pos_deviation)):.0f}")
 
     return trial_n_samples
 

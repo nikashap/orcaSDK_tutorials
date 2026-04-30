@@ -44,191 +44,121 @@ class FrictionMLP(nn.Module):
 
 # ── Paths ────────────────────────────────────────────────────────────────
 
-CHECKPOINT_PATH = "../models/friction/run_001/best_model.pt"       # trained checkpoint
-DATASET_PATH = "../models/friction/friction_dataset.npz"   # only needed if checkpoint lacks norm_stats
+CHECKPOINT_PATH = "../models/friction/results/run_001/best_model.pt"
+TARGET_KEY = "force_mN_realized_aligned"
 
 
-def load_model(checkpoint_path):
+# ── FrictionPredictor (mirrors orca_interface.py) ────────────────────────
+
+class FrictionPredictor:
+    """Wraps a trained FrictionMLP checkpoint for inference.
+
+    Handles normalization/denormalization internally so the caller can
+    pass raw physical values and receive predictions in mN.
+    Matches the implementation used in orca_interface.py.
     """
-    Load the checkpoint and reconstruct the model.
 
-    The checkpoint saved by train_model.py already contains:
-      - model_state_dict
-      - input_keys        (ordered list of feature names)
-      - n_inputs
-      - hidden_dims
-      - activation
-      - dropout
-      - norm_stats        (dict: key -> {mean, std} for every feature + target)
+    def __init__(self, checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
 
-    Returns
-    -------
-    model : FrictionMLP  (eval mode, on CPU)
-    input_keys : list[str]
-    norm_stats : dict
-    """
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+        self.input_keys = ckpt["input_keys"]
+        self.norm_stats = ckpt["norm_stats"]
+        self.target_key = TARGET_KEY
 
-    model = FrictionMLP(
-        n_inputs=ckpt["n_inputs"],
-        hidden_dims=ckpt["hidden_dims"],
-        activation=ckpt["activation"],
-        dropout=ckpt["dropout"],
-    )
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
+        self._model = FrictionMLP(
+            n_inputs=ckpt["n_inputs"],
+            hidden_dims=ckpt["hidden_dims"],
+            activation=ckpt["activation"],
+            dropout=ckpt["dropout"],
+        )
+        self._model.load_state_dict(ckpt["model_state_dict"])
+        self._model.eval()
 
-    return model, ckpt["input_keys"], ckpt["norm_stats"]
+        # Pre-compute normalization arrays for fast vectorized transform
+        self._input_means = np.array(
+            [self.norm_stats[k]["mean"] for k in self.input_keys],
+            dtype=np.float32,
+        )
+        self._input_stds = np.array(
+            [self.norm_stats[k]["std"] if self.norm_stats[k]["std"] > 1e-12 else 1.0
+             for k in self.input_keys],
+            dtype=np.float32,
+        )
+        self._target_mean = self.norm_stats[self.target_key]["mean"]
+        self._target_std = (
+            self.norm_stats[self.target_key]["std"]
+            if self.norm_stats[self.target_key]["std"] > 1e-12 else 1.0
+        )
 
+        # Pre-allocate input tensor (1 sample) to avoid repeated allocation
+        self._x_buf = torch.zeros(1, ckpt["n_inputs"], dtype=torch.float32)
 
-def load_norm_stats_from_dataset(dataset_path):
-    """
-    Fallback: pull the mean/std values directly from friction_dataset.npz
-    (in case you have an older checkpoint that didn't save norm_stats).
-    """
-    d = np.load(dataset_path, allow_pickle=True)
+    @torch.no_grad()
+    def predict_mN(self, position_um, velocity_mm_s, accel_mmpss_prev,
+                   force_mN_sensed):
+        """Single-sample inference. Returns force_realized in mN."""
+        raw = np.array([position_um, velocity_mm_s, accel_mmpss_prev,
+                        force_mN_sensed], dtype=np.float32)
+        normed = (raw - self._input_means) / self._input_stds
+        self._x_buf[0] = torch.from_numpy(normed)
+        y_norm = self._model(self._x_buf).item()
+        return y_norm * self._target_std + self._target_mean
 
-    TARGET_KEY = "force_mN_realized_aligned"
-    ALL_KEYS = [
-        "position_um_aligned",
-        "velocity_mm_s_aligned",
-        "force_mN_sensed_aligned",
-        "accel_mmpss_prev",
-        TARGET_KEY,
-    ]
+    @torch.no_grad()
+    def predict_batch_mN(self, position_um, velocity_mm_s, accel_mmpss_prev,
+                         force_mN_sensed):
+        """Batch inference. All inputs are 1-D arrays of length N.
+        Returns a 1-D numpy array of force_realized in mN."""
+        raw = np.column_stack([
+            position_um, velocity_mm_s, accel_mmpss_prev, force_mN_sensed,
+        ]).astype(np.float32)
 
-    norm_stats = {}
-    for key in ALL_KEYS:
-        norm_stats[key] = {
-            "mean": float(d[f"{key}_mean"]),
-            "std":  float(d[f"{key}_std"]),
-        }
-    return norm_stats
-
-
-# ── Normalize / denormalize helpers ──────────────────────────────────────
-
-def normalize_inputs(raw_values: dict, input_keys: list, norm_stats: dict):
-    """
-    Take a dict of raw physical values and return a (1, n_inputs) tensor
-    ready for the model.
-
-    Parameters
-    ----------
-    raw_values : dict
-        e.g. {"position_um_aligned": 250000.0,
-              "velocity_mm_s_aligned": 50.0,
-              "accel_mmpss_prev": 1200.0,
-              "force_mN_sensed_aligned": 300.0}
-    input_keys : list[str]
-        Ordered feature names (must match the order the model was trained with).
-    norm_stats : dict
-        key -> {"mean": float, "std": float}
-
-    Returns
-    -------
-    x : torch.Tensor, shape (1, n_inputs)
-    """
-    normed = []
-    for key in input_keys:
-        mean = norm_stats[key]["mean"]
-        std = norm_stats[key]["std"]
-        if std < 1e-12:
-            std = 1.0
-        normed.append((raw_values[key] - mean) / std)
-
-    return torch.tensor([normed], dtype=torch.float32)   # shape (1, n_inputs)
-
-
-def denormalize_output(y_norm: float, norm_stats: dict,
-                       target_key="force_mN_realized_aligned"):
-    """
-    Convert the model's normalized scalar output back to physical units (mN).
-
-    During training the target was normalized as:
-        y_norm = (y_raw - mean) / std
-
-    So we invert:
-        y_raw = y_norm * std + mean
-    """
-    mean = norm_stats[target_key]["mean"]
-    std = norm_stats[target_key]["std"]
-    return y_norm * std + mean
+        normed = (raw - self._input_means) / self._input_stds
+        x_batch = torch.from_numpy(normed)
+        y_norm = self._model(x_batch).numpy()
+        return y_norm * self._target_std + self._target_mean
 
 
 # ── Example usage ────────────────────────────────────────────────────────
 
 def main():
-    # 1. Load model + normalization stats from checkpoint
-    model, input_keys, norm_stats = load_model(CHECKPOINT_PATH)
+    # 1. Load predictor (model + norm stats from checkpoint)
+    predictor = FrictionPredictor(CHECKPOINT_PATH)
 
     print("Model architecture:")
-    print(model)
-    print(f"\nInput keys (in order): {input_keys}")
-    print(f"\nNormalization statistics:")
-    for key, stats in norm_stats.items():
+    print(predictor._model)
+    print(f"\nInput keys (in order): {predictor.input_keys}")
+    print(f"\nNormalization statistics (from checkpoint):")
+    for key, stats in predictor.norm_stats.items():
         print(f"  {key:40s}  mean={stats['mean']:12.4f}  std={stats['std']:12.4f}")
 
     # ------------------------------------------------------------------
-    # 2. Prepare a single raw (un-normalized) sample
-    #
-    #    For model_variant=2 the expected inputs are:
-    #      position_um_aligned      (µm)
-    #      velocity_mm_s_aligned    (mm/s)
-    #      accel_mmpss_prev         (mm/s²)  – previous timestep
-    #      force_mN_sensed_aligned  (mN)
+    # 2. Single-sample inference
     # ------------------------------------------------------------------
-    raw_sample = {
-        "position_um_aligned":     250000.0,   # µm
-        "velocity_mm_s_aligned":       50.0,   # mm/s
-        "accel_mmpss_prev":          1200.0,   # mm/s²
-        "force_mN_sensed_aligned":    300.0,   # mN
-    }
-
-    # 3. Normalize inputs
-    x_tensor = normalize_inputs(raw_sample, input_keys, norm_stats)
-    print(f"\nRaw inputs:        {raw_sample}")
-    print(f"Normalized tensor: {x_tensor}")
-
-    # 4. Run inference
-    with torch.no_grad():
-        y_norm = model(x_tensor).item()        # single scalar
-
-    # 5. Denormalize the output back to mN
-    y_mN = denormalize_output(y_norm, norm_stats)
-
-    print(f"\nModel output (normalized): {y_norm:.6f}")
-    print(f"Model output (mN):         {y_mN:.4f}")
+    print("\n--- Single-sample inference ---")
+    point1=[250000, 50.0, 20, 5000]
+    point1 = {"position_um":250000.0,
+        "velocity_mm_s":50.0,
+        "accel_mmpss_prev":20,
+        "force_mN_sensed":10000
+        }
+    print(f"\nData point to predict:\n{point1}")
+    y_mN = predictor.predict_mN(**point1)
+    print(f"  Predicted force_realized = {y_mN:.4f} mN")
 
     # ------------------------------------------------------------------
-    # 6. Batch inference example – process many samples at once
+    # 3. Batch inference
     # ------------------------------------------------------------------
     N = 5
     rng = np.random.default_rng(42)
-    batch_raw = {
-        "position_um_aligned":     rng.uniform(10000, 550000, size=N),
-        "velocity_mm_s_aligned":   rng.uniform(-200, 200, size=N),
-        "accel_mmpss_prev":        rng.uniform(-5000, 5000, size=N),
-        "force_mN_sensed_aligned": rng.uniform(0, 600, size=N),
-    }
+    y_mN_batch = predictor.predict_batch_mN(
+        position_um=rng.uniform(10000, 550000, size=N),
+        velocity_mm_s=rng.uniform(-200, 200, size=N),
+        accel_mmpss_prev=rng.uniform(-5000, 5000, size=N),
+        force_mN_sensed=rng.uniform(0, 600, size=N),
+    )
 
-    # Normalize each feature column
-    cols = []
-    for key in input_keys:
-        mean = norm_stats[key]["mean"]
-        std = norm_stats[key]["std"] if norm_stats[key]["std"] > 1e-12 else 1.0
-        cols.append((batch_raw[key] - mean) / std)
-
-    x_batch = torch.tensor(np.column_stack(cols), dtype=torch.float32)  # (N, n_inputs)
-
-    with torch.no_grad():
-        y_norm_batch = model(x_batch).numpy()    # (N,)
-
-    target_mean = norm_stats["force_mN_realized_aligned"]["mean"]
-    target_std = norm_stats["force_mN_realized_aligned"]["std"]
-    y_mN_batch = y_norm_batch * target_std + target_mean
-
-    print(f"\nBatch inference ({N} samples):")
+    print(f"\n--- Batch inference ({N} samples) ---")
     for i in range(N):
         print(f"  Sample {i}: predicted force_realized = {y_mN_batch[i]:.4f} mN")
 
