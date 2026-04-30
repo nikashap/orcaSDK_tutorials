@@ -45,6 +45,11 @@ _PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
 
 FORCE_SAFETY_LIMIT_MN = 30000
 
+# Tighter safety limit for compensated replays: friction-compensated commands
+# can exceed the original commanded force in magnitude, so we cap them lower
+# than the standard limit to keep the motor in a safe envelope.
+FORCE_SAFETY_LIMIT_COMPENSATED_MN = 45000
+
 with open(_PARAMS_PATH, "r") as f:
     PARAMS = yaml.safe_load(f)
 
@@ -381,11 +386,128 @@ def load_trajectories(filepath):
     return trajectories
 
 
+def load_compensated_trajectories(augmented_npz_path,
+                                   reference_trajectories_path,
+                                   theta_tol_rad=np.radians(0.5)):
+    """Build trajectory dicts for replay with friction-compensated commands.
+
+    Loads two files:
+      - augmented_npz_path: a calibration_simulation_friction_with_estimate.npz
+        produced by estimate_friction_from_simulation.py. Provides per-trial
+        force_commanded_mN, force_friction_estimate, and trial metadata.
+      - reference_trajectories_path: the simulation_trajectories.npz produced
+        alongside the original collection run. Provides per-sim-step
+        sim_cart_x, sim_cart_xdot, sim_cart_xddot arrays needed by
+        run_simulation_trial.
+
+    For each trial in the augmented npz, the compensated force command is
+
+        F_command_compensated[i] = force_commanded_mN[i]
+                                   + force_friction_estimate[i]
+
+    Each compensated trajectory is matched to a reference trajectory by
+    (theta_init, start_position_um). The reference's per-sim-step arrays
+    are sliced to the same n_steps as the recorded trial (which may be
+    shorter than the original sim length if the trial hit a safety stop).
+
+    Returns a list of trajectory dicts compatible with run_simulation_trial.
+    """
+    print(f"Loading augmented friction data: {augmented_npz_path}")
+    aug = np.load(augmented_npz_path, allow_pickle=True)
+    n_trials = int(aug["n_trials"])
+    boundaries = aug["trial_boundaries"]
+
+    print(f"Loading reference trajectories: {reference_trajectories_path}")
+    ref = np.load(reference_trajectories_path)
+    n_ref = int(ref["n_trajectories"])
+    ref_boundaries = ref["traj_boundaries"]
+    sim_dt_s = float(ref["sim_timestep_s"])
+    ref_thetas = ref["traj_theta_init"]
+    ref_starts = ref["traj_start_position_um"]
+
+    trajectories = []
+    skipped = 0
+
+    for i in range(n_trials):
+        lo, hi = int(boundaries[i]), int(boundaries[i + 1])
+        n_recorded = hi - lo
+        if n_recorded < 2:
+            print(f"  Trial {i + 1}: too few samples ({n_recorded}), skipping.")
+            skipped += 1
+            continue
+
+        theta = float(aug["trial_theta_init"][i])
+        start_pos = int(aug["trial_start_position_um"][i])
+
+        # Match to a reference trajectory.
+        match_idx = None
+        for j in range(n_ref):
+            if int(ref_starts[j]) != start_pos:
+                continue
+            if abs(float(ref_thetas[j]) - theta) > theta_tol_rad:
+                continue
+            match_idx = j
+            break
+        if match_idx is None:
+            print(f"  Trial {i + 1}: no reference trajectory match for "
+                  f"(theta={np.degrees(theta):+.1f}°, start={start_pos} um); "
+                  f"skipping.")
+            skipped += 1
+            continue
+
+        # Build the compensated force trajectory.
+        f_cmd = aug["force_commanded_mN"][lo:hi].astype(np.float64)
+        f_friction = aug["force_friction_estimate"][lo:hi].astype(np.float64)
+        # Replace any NaNs in the friction estimate with 0 (no compensation
+        # at those samples). NaNs shouldn't occur with the current estimator
+        # but we guard against it for safety.
+        f_friction = np.nan_to_num(f_friction, nan=0.0)
+        f_compensated = f_cmd + f_friction
+
+        # Slice the matched reference trajectory to the recorded length so
+        # run_simulation_trial sees the right number of sim steps.
+        rlo, rhi = int(ref_boundaries[match_idx]), int(ref_boundaries[match_idx + 1])
+        n_ref_steps = rhi - rlo
+        n_use = min(n_recorded, n_ref_steps)
+        if n_use < n_recorded:
+            print(f"  Trial {i + 1}: recorded ({n_recorded}) longer than "
+                  f"reference ({n_ref_steps}); truncating to {n_use}.")
+        f_compensated = f_compensated[:n_use]
+
+        trajectories.append({
+            "force_commands_mN": f_compensated,
+            "theta_init": theta,
+            "start_position_um": start_pos,
+            "sim_cart_x": ref["sim_cart_x"][rlo:rlo + n_use],
+            "sim_cart_xdot": ref["sim_cart_xdot"][rlo:rlo + n_use],
+            "sim_cart_xddot": ref["sim_cart_xddot"][rlo:rlo + n_use],
+            "sim_pend_theta": ref["sim_pend_theta"][rlo:rlo + n_use],
+            "sim_pend_thetadot": ref["sim_pend_thetadot"][rlo:rlo + n_use],
+            "sim_timestep_s": sim_dt_s,
+            "n_steps": n_use,
+        })
+
+    print(f"Built {len(trajectories)} compensated trajectories "
+          f"(skipped {skipped}).")
+    if trajectories:
+        all_compensated = np.concatenate(
+            [t["force_commands_mN"] for t in trajectories]
+        )
+        max_abs = float(np.max(np.abs(all_compensated)))
+        print(f"  Max |F_command_compensated|: {max_abs:.0f} mN")
+        if max_abs > FORCE_SAFETY_LIMIT_COMPENSATED_MN:
+            print(f"  Note: some compensated commands exceed the tighter "
+                  f"safety limit ({FORCE_SAFETY_LIMIT_COMPENSATED_MN} mN) "
+                  f"and will be clamped during replay.")
+    return trajectories
+
+
 # ---------------------------------------------------------------------------
 # Motor data collection
 # ---------------------------------------------------------------------------
 
-def run_simulation_trial(motor, trajectory):
+def run_simulation_trial(motor, trajectory,
+                          force_safety_limit_mn=FORCE_SAFETY_LIMIT_MN):
     """Replay one pre-computed force trajectory on the motor.
 
     Commands each force value in sequence while recording the motor's
@@ -430,8 +552,8 @@ def run_simulation_trial(motor, trajectory):
 
     for i, F_cmd in enumerate(force_commands):
         t_beg = time.perf_counter()
-        F_cmd_clamped = int(max(-FORCE_SAFETY_LIMIT_MN,
-                                min(FORCE_SAFETY_LIMIT_MN, F_cmd)))
+        F_cmd_clamped = int(max(-force_safety_limit_mn,
+                                min(force_safety_limit_mn, F_cmd)))
         motor.set_streamed_force_mN(F_cmd_clamped)
 
         motor.run()
@@ -503,13 +625,24 @@ def run_simulation_trial(motor, trajectory):
     }
 
 
-def collect_simulation_data(motor, trajectories):
+def collect_simulation_data(motor, trajectories,
+                            output_filename="calibration_simulation_friction.npz",
+                            force_safety_limit_mn=FORCE_SAFETY_LIMIT_MN):
     """Run all pre-computed trajectories on the motor and save data.
 
     Output npz has per-sample force_commanded_mN (same as rampdown/sinusoid
     format) so analyze_friction.py can process it directly.  Also includes
     sim_position_um, sim_velocity_mm_s, sim_accel_mmpss for trajectory
     deviation analysis.
+
+    Parameters
+    ----------
+    output_filename : str
+        Filename (saved into DATA_DIR) for the resulting npz.
+    force_safety_limit_mn : int
+        Per-step clamp magnitude on the commanded force.  Compensated
+        replays should pass a tighter value than the standard
+        FORCE_SAFETY_LIMIT_MN.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -518,6 +651,8 @@ def collect_simulation_data(motor, trajectories):
     all_force_mN = []
     all_t_accel = []
     all_accel_mmpss = []
+    all_t_vel = []
+    all_vel_mm_s = []
     all_force_commanded_mN = []
 
     # Simulation reference trajectory arrays
@@ -559,7 +694,9 @@ def collect_simulation_data(motor, trajectories):
             time.sleep(0.3)
 
             print(f"  Replaying trajectory...")
-            trial_data = run_simulation_trial(motor, traj)
+            trial_data = run_simulation_trial(
+                motor, traj, force_safety_limit_mn=force_safety_limit_mn,
+            )
 
             n_samples = len(trial_data["t_stream"])
             if n_samples == 0:
@@ -579,6 +716,8 @@ def collect_simulation_data(motor, trajectories):
             all_position_um.append(trial_data["position_um"])
             all_force_mN.append(trial_data["force_mN"])
             all_t_accel.append(trial_data["t_accel"])
+            all_t_vel.append(trial_data["t_vel"])
+            all_vel_mm_s.append(trial_data["vel_mm_s"])
             all_accel_mmpss.append(trial_data["accel_mmpss"])
             all_force_commanded_mN.append(trial_data["force_commanded_mN"])
 
@@ -604,7 +743,7 @@ def collect_simulation_data(motor, trajectories):
         print("\nNo trials completed, nothing to save.")
         return []
 
-    filepath = os.path.join(DATA_DIR, "calibration_simulation_friction.npz")
+    filepath = os.path.join(DATA_DIR, output_filename)
 
     trial_n_samples_arr = np.array(trial_n_samples, dtype=np.int32)
     trial_boundaries = np.concatenate([[0], np.cumsum(trial_n_samples_arr)])
@@ -636,6 +775,8 @@ def collect_simulation_data(motor, trajectories):
         force_commanded_mN=np.concatenate(all_force_commanded_mN),
         t_accel=np.concatenate(all_t_accel),
         accel_mmpss=np.concatenate(all_accel_mmpss),
+        t_vel=np.concatenate(all_t_vel),
+        vel_mm_s=np.concatenate(all_vel_mm_s),
         # Concatenated per-sample arrays — simulation reference trajectory
         sim_position_um=np.concatenate(all_sim_position_um),
         sim_velocity_mm_s=np.concatenate(all_sim_velocity_mm_s),
@@ -691,7 +832,12 @@ def main():
     print(f"  1) Generate trajectories only (no motor needed)")
     print(f"  2) Generate trajectories and collect motor data")
     print(f"  3) Load existing trajectories and collect motor data")
-    choice = input("Select [1/2/3]: ").strip() or "2"
+    print(f"  4) Replay with friction compensation from a previous run")
+    choice = input("Select [1/2/3/4]: ").strip() or "2"
+
+    # Defaults for the standard collection path; overridden by option 4.
+    output_filename = "calibration_simulation_friction.npz"
+    force_safety_limit_mn = FORCE_SAFETY_LIMIT_MN
 
     if choice in ("1", "2"):
         trajectories = generate_trajectories()
@@ -710,6 +856,43 @@ def main():
             print(f"File not found: {traj_path}")
             return
         trajectories = load_trajectories(traj_path)
+
+    elif choice == "4":
+        aug_path = input(
+            "Path to calibration_simulation_friction_with_estimate.npz: "
+        ).strip()
+        if not os.path.isfile(aug_path):
+            print(f"File not found: {aug_path}")
+            return
+        # Look for simulation_trajectories.npz alongside the augmented npz.
+        source_dir = os.path.dirname(os.path.abspath(aug_path))
+        ref_path = os.path.join(source_dir, "simulation_trajectories.npz")
+        if not os.path.isfile(ref_path):
+            ref_path = input(
+                f"simulation_trajectories.npz not found in {source_dir}.\n"
+                f"  Enter path to simulation_trajectories.npz: "
+            ).strip()
+            if not os.path.isfile(ref_path):
+                print(f"File not found: {ref_path}")
+                return
+
+        trajectories = load_compensated_trajectories(aug_path, ref_path)
+        if not trajectories:
+            print("No compensated trajectories built; aborting.")
+            return
+
+        # Use a distinct output filename and tighter safety limit.
+        output_filename = "calibration_simulation_friction_compensated.npz"
+        force_safety_limit_mn = FORCE_SAFETY_LIMIT_COMPENSATED_MN
+
+        # Copy simulation_trajectories.npz forward into the new run's DATA_DIR
+        # so compare_simulation_to_shaft.py can find it without flags.
+        os.makedirs(DATA_DIR, exist_ok=True)
+        forwarded_ref = os.path.join(DATA_DIR, "simulation_trajectories.npz")
+        if os.path.abspath(ref_path) != os.path.abspath(forwarded_ref):
+            import shutil
+            shutil.copy2(ref_path, forwarded_ref)
+            print(f"Copied {ref_path} → {forwarded_ref}")
 
     else:
         print(f"Invalid choice: {choice}")
@@ -736,7 +919,11 @@ def main():
     input("\nPress Enter to begin data collection...")
 
     try:
-        collect_simulation_data(motor, trajectories)
+        collect_simulation_data(
+            motor, trajectories,
+            output_filename=output_filename,
+            force_safety_limit_mn=force_safety_limit_mn,
+        )
     finally:
         print("\nShutting down motor...")
         try:

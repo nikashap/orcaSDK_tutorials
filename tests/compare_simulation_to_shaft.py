@@ -109,7 +109,7 @@ def load_shaft_data(filepath):
             "accel_mmpss": d["accel_mmpss"][lo:hi].astype(np.float64),
             "force_commanded_mN": d["force_commanded_mN"][lo:hi].astype(np.float64),
             "t_vel_s": d["t_vel"][lo:hi].astype(np.float64) - t0,
-            "vel_mm_s":d["vel_mm_s"][lo:hi].astype(np.int32)
+            "vel_mm_s": d["vel_mm_s"][lo:hi].astype(np.float64),
         })
 
     metadata = {
@@ -243,6 +243,26 @@ def compute_position_comparison(shaft_trial, ref_traj, motor_center_um):
     return t_common, x_ref, x_shaft_on_ref
 
 
+def compute_velocity_comparison(shaft_trial, ref_traj):
+    """Return (t_common_s, v_ref_mm_s, v_shaft_mm_s_on_ref_grid).
+    Reference sim velocity (m/s) is converted to mm/s to match the shaft
+    register units. The reference grid is trimmed to the shaft's recorded
+    velocity interval.
+    """
+    v_ref_mm_s_full = ref_traj["sim_cart_xdot_mps"] * 1e3
+    t_ref_full = ref_traj["t_ref_s"]
+
+    t_vel = shaft_trial["t_vel_s"]
+    v_shaft_raw = shaft_trial["vel_mm_s"]
+
+    t_max = min(float(t_vel[-1]), float(t_ref_full[-1]))
+    mask = t_ref_full <= t_max
+    t_common = t_ref_full[mask]
+    v_ref = v_ref_mm_s_full[mask]
+    v_shaft_on_ref = _interp_onto_grid(t_vel, v_shaft_raw, t_common)
+    return t_common, v_ref, v_shaft_on_ref
+
+
 def acceleration_rmse(a_ref, a_shaft):
     """RMSE in mm/s² over points where both are finite."""
     valid = np.isfinite(a_ref) & np.isfinite(a_shaft)
@@ -256,8 +276,16 @@ def acceleration_rmse(a_ref, a_shaft):
 # ---------------------------------------------------------------------------
 
 def plot_trial_comparison(shaft_trial, ref_traj, motor_center_um):
-    """Three stacked panels: acceleration, position, force command."""
+    """Four stacked panels: acceleration, velocity, position, force command.
+
+    Acceleration and velocity are placed adjacent so that velocity zero-
+    crossings line up visually with the corresponding features in the
+    acceleration trace (e.g. the troughs of an "M" pattern).
+    """
     t_acc, a_ref, a_shaft_on_ref = compute_acceleration_comparison(
+        shaft_trial, ref_traj
+    )
+    t_vel, v_ref, v_shaft_on_ref = compute_velocity_comparison(
         shaft_trial, ref_traj
     )
     t_pos, x_ref, x_shaft_on_ref = compute_position_comparison(
@@ -265,7 +293,7 @@ def plot_trial_comparison(shaft_trial, ref_traj, motor_center_um):
     )
     rmse = acceleration_rmse(a_ref, a_shaft_on_ref)
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
 
     # --- Panel 1: Acceleration overlay ---
     ax = axes[0]
@@ -286,8 +314,22 @@ def plot_trial_comparison(shaft_trial, ref_traj, motor_center_um):
         f"accel RMSE = {rmse:.0f} mm/s²"
     )
 
-    # --- Panel 2: Position overlay ---
+    # --- Panel 2: Velocity overlay ---
     ax = axes[1]
+    ax.plot(t_vel, v_ref, color="C0", linewidth=1.4,
+            label="Cart velocity (simulation reference)")
+    ax.plot(shaft_trial["t_vel_s"], shaft_trial["vel_mm_s"],
+            color="C1", linewidth=0.8, alpha=0.55,
+            label="Shaft velocity (raw, native timestamps)")
+    ax.plot(t_vel, v_shaft_on_ref, color="C3", linewidth=1.0, linestyle="--",
+            label="Shaft velocity (interp to sim grid)")
+    ax.axhline(0.0, color="black", linewidth=0.6, alpha=0.5)
+    ax.set_ylabel("Velocity (mm/s)")
+    ax.legend(fontsize=8, loc="best")
+    ax.grid(True, alpha=0.3)
+
+    # --- Panel 3: Position overlay ---
+    ax = axes[2]
     ax.plot(t_pos, x_ref, color="C0", linewidth=1.4,
             label="Cart position (simulation reference)")
     ax.plot(shaft_trial["t_stream_s"], shaft_trial["position_um"],
@@ -299,8 +341,8 @@ def plot_trial_comparison(shaft_trial, ref_traj, motor_center_um):
     ax.legend(fontsize=8, loc="best")
     ax.grid(True, alpha=0.3)
 
-    # --- Panel 3: Force command sanity check ---
-    ax = axes[2]
+    # --- Panel 4: Force command sanity check ---
+    ax = axes[3]
     ax.plot(ref_traj["t_ref_s"], ref_traj["force_command_mN"],
             color="C0", linewidth=1.0,
             label="F_command from sim (reference file)")
