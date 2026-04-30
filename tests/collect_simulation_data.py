@@ -63,6 +63,8 @@ DEFAULT_SERIAL_PORT = PARAMS["default_serial_port"]
 DATE_STR = datetime.now().strftime('%y_%m_%d-%H_%M_%S')
 DATA_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, PARAMS["data_dir"], DATE_STR))
 
+CTRL_LOOP_DURATION_S = 0.004 #dt=0.004 in the xml file that governs cart-pendulum dynamics
+
 # ---------------------------------------------------------------------------
 # Motor ↔ simulation coordinate mapping
 # ---------------------------------------------------------------------------
@@ -418,6 +420,7 @@ def run_simulation_trial(motor, trajectory):
     safe_max = MOTOR_MAX_UM - SAFETY_MARGIN_UM
 
     for i, F_cmd in enumerate(force_commands):
+        t_beg = time.perf_counter()
         F_cmd_clamped = int(max(-FORCE_SAFETY_LIMIT_MN,
                                 min(FORCE_SAFETY_LIMIT_MN, F_cmd)))
         motor.set_streamed_force_mN(F_cmd_clamped)
@@ -461,6 +464,10 @@ def run_simulation_trial(motor, trajectory):
         if stream_data.errors:
             print(f"    Motor error: {stream_data.errors}")
             break
+        t_end = time.perf_counter()
+        loop_dur = t_end - t_beg
+        if (loop_dur) < CTRL_LOOP_DURATION_S:
+            time.sleep(CTRL_LOOP_DURATION_S - loop_dur)
 
     motor.set_streamed_force_mN(0)
     motor.set_mode(MotorMode.SleepMode)
