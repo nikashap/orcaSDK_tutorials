@@ -135,7 +135,7 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
         latencies = []
         
         if test_stream:
-            print("Testing speed of Motor stream with one additional read/write,")
+            print("Testing speed of Motor stream with TWO additional read/write (accel and vel),")
             print("in FORCE mode\n")
 
             motor.set_mode(MotorMode.ForceMode)
@@ -186,11 +186,17 @@ def test_serial_ftdi(port, baud_rate, interframe_delay, test_stream=True):
                 measured_accel = motor.read_wide_register_blocking(
                     reg_address=orca_reg.SHAFT_ACCEL_MMPSS,
                 )
+
+                ## For testing latencies with TWO read/writes to registers (not streamed)
+                measured_speed = motor.read_wide_register_blocking(
+                    reg_address=orca_reg.SHAFT_SPEED_MMPS
+                )
                 
                 current_pos = motor.get_stream_data().position
                 if current_pos != prev_pos:  # we know a response actually arrived
                     # print("Acceleration: " + str(measured_accel.value), end="         \r")
-                    print("Force: "+ str(motor.get_stream_data().force)+ "\tAcceleration: "+ str(measured_accel.value), end="         \r")
+                    # print("Force: "+ str(motor.get_stream_data().force)+ "\tAcceleration: "+ str(measured_accel.value), end="         \r")
+                    print("Force: "+ str(motor.get_stream_data().force)+ "\tSpeed: "+str(measured_speed.value)+"\tAcceleration: "+ str(measured_accel.value), end="         \r")
                     # print("Force: "+ str(motor.get_stream_data().force), end="         \r")
                     ##
                     t_now = time.perf_counter()
