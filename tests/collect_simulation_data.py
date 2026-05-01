@@ -43,12 +43,52 @@ XML_FILEPATH = '~/Documents/nikashap/cartpole-target/orca/cartpendulum-orca.xml'
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
 
-FORCE_SAFETY_LIMIT_MN = 30000
+FORCE_SAFETY_LIMIT_MN = 60000
 
-# Tighter safety limit for compensated replays: friction-compensated commands
+# Different safety limit for compensated replays: friction-compensated commands
 # can exceed the original commanded force in magnitude, so we cap them lower
 # than the standard limit to keep the motor in a safe envelope.
-FORCE_SAFETY_LIMIT_COMPENSATED_MN = 45000
+FORCE_SAFETY_LIMIT_COMPENSATED_MN = 70000
+
+
+# ---------------------------------------------------------------------------
+# Iteration / filename conventions (must match estimate_friction_from_simulation.py)
+# ---------------------------------------------------------------------------
+
+import re
+
+_AUG_RE_ITER = re.compile(
+    r"^calibration_simulation_friction_compensated_iter(\d+)_with_estimate\.npz$"
+)
+
+
+def shaft_filename_for_iteration(iteration):
+    """Filename of the shaft data npz produced at the given iteration."""
+    if iteration == 0:
+        return "calibration_simulation_friction.npz"
+    if iteration == 1:
+        return "calibration_simulation_friction_compensated.npz"
+    return f"calibration_simulation_friction_compensated_iter{iteration}.npz"
+
+
+def detect_iteration_from_augmented_filename(filename):
+    """Infer the iteration of the augmented (with-estimate) npz at `filename`.
+
+    The 'iteration' of an augmented file is the iteration that *produced* the
+    underlying shaft data — so iter 0's augmented file came from iter 0's
+    shaft data, etc. Replaying with that augmented file produces iter (N+1).
+
+    Returns None if the filename doesn't match a known pattern.
+    """
+    base = os.path.basename(filename)
+    if base == "calibration_simulation_friction_with_estimate.npz":
+        return 0
+    if base == "calibration_simulation_friction_compensated_with_estimate.npz":
+        return 1
+    m = _AUG_RE_ITER.match(base)
+    if m:
+        return int(m.group(1))
+    return None
 
 with open(_PARAMS_PATH, "r") as f:
     PARAMS = yaml.safe_load(f)
@@ -386,9 +426,43 @@ def load_trajectories(filepath):
     return trajectories
 
 
+def _smooth_residual_per_trial(residual_arr, trial_boundaries, window):
+    """Apply a centered moving average of `window` samples to `residual_arr`,
+    operating independently within each trial slice so the smoothing window
+    never crosses a trial boundary.
+
+    Edges of each trial use a smaller window (min_periods=1 semantics) so
+    breakaway samples at trial start aren't diluted with zeros.
+
+    `window=1` (or less) returns the input unchanged.
+    """
+    if window is None or window <= 1:
+        return residual_arr.copy()
+    out = np.empty_like(residual_arr)
+    half = window // 2
+    for k in range(len(trial_boundaries) - 1):
+        lo, hi = int(trial_boundaries[k]), int(trial_boundaries[k + 1])
+        if hi - lo == 0:
+            continue
+        seg = residual_arr[lo:hi]
+        # Build per-sample mean over the window centered at each index,
+        # clipped to the trial's own slice. This is equivalent to
+        # pandas' rolling(window, center=True, min_periods=1).mean().
+        n = len(seg)
+        smoothed = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            wlo = max(0, i - half)
+            whi = min(n, i + half + 1)
+            smoothed[i] = np.mean(seg[wlo:whi])
+        out[lo:hi] = smoothed
+    return out
+
+
 def load_compensated_trajectories(augmented_npz_path,
                                    reference_trajectories_path,
-                                   theta_tol_rad=np.radians(0.5)):
+                                   theta_tol_rad=np.radians(0.5),
+                                   learning_gain=0.5,
+                                   smoothing_window=5):
     """Build trajectory dicts for replay with friction-compensated commands.
 
     Loads two files:
@@ -403,7 +477,22 @@ def load_compensated_trajectories(augmented_npz_path,
     For each trial in the augmented npz, the compensated force command is
 
         F_command_compensated[i] = force_commanded_mN[i]
-                                   + force_friction_estimate[i]
+                                   + learning_gain * smooth(force_friction_estimate)[i]
+
+    where `smooth` is a centered moving average with `smoothing_window`
+    samples (applied per-trial, no cross-boundary mixing).
+
+    Parameters
+    ----------
+    learning_gain : float
+        Scalar multiplier on the friction-estimate residual. Conservative
+        ILC values are 0.3-0.7. Gain = 1.0 fully trusts the residual;
+        gain < 1.0 hedges against trajectory-dependent friction drift
+        between iterations.
+    smoothing_window : int
+        Window length (in samples) for the moving average applied to the
+        residual before scaling. Window = 1 disables smoothing. The window
+        is centered and clipped to each trial's slice.
 
     Each compensated trajectory is matched to a reference trajectory by
     (theta_init, start_position_um). The reference's per-sim-step arrays
@@ -424,6 +513,17 @@ def load_compensated_trajectories(augmented_npz_path,
     sim_dt_s = float(ref["sim_timestep_s"])
     ref_thetas = ref["traj_theta_init"]
     ref_starts = ref["traj_start_position_um"]
+
+    # Pre-smooth the residual across the whole concatenated array but
+    # respecting trial boundaries (smoothing within a trial only).
+    raw_friction = aug["force_friction_estimate"].astype(np.float64)
+    raw_friction = np.nan_to_num(raw_friction, nan=0.0)
+    smoothed_friction = _smooth_residual_per_trial(
+        raw_friction, boundaries, smoothing_window
+    )
+    print(f"  Learning gain: {learning_gain}")
+    print(f"  Residual smoothing window: {smoothing_window} samples"
+          f"{' (disabled)' if smoothing_window <= 1 else ''}")
 
     trajectories = []
     skipped = 0
@@ -455,14 +555,11 @@ def load_compensated_trajectories(augmented_npz_path,
             skipped += 1
             continue
 
-        # Build the compensated force trajectory.
+        # Build the compensated force trajectory:
+        #   F_compensated = F_commanded + gain * smoothed_residual
         f_cmd = aug["force_commanded_mN"][lo:hi].astype(np.float64)
-        f_friction = aug["force_friction_estimate"][lo:hi].astype(np.float64)
-        # Replace any NaNs in the friction estimate with 0 (no compensation
-        # at those samples). NaNs shouldn't occur with the current estimator
-        # but we guard against it for safety.
-        f_friction = np.nan_to_num(f_friction, nan=0.0)
-        f_compensated = f_cmd + f_friction
+        f_residual = smoothed_friction[lo:hi]
+        f_compensated = f_cmd + learning_gain * f_residual
 
         # Slice the matched reference trajectory to the recorded length so
         # run_simulation_trial sees the right number of sim steps.
@@ -859,11 +956,77 @@ def main():
 
     elif choice == "4":
         aug_path = input(
-            "Path to calibration_simulation_friction_with_estimate.npz: "
+            "Path to augmented friction-estimate npz "
+            "(e.g. calibration_simulation_friction_with_estimate.npz "
+            "for iter 0->1, or _compensated_with_estimate.npz for "
+            "iter 1->2): "
         ).strip()
         if not os.path.isfile(aug_path):
             print(f"File not found: {aug_path}")
             return
+
+        # Detect the source iteration from the filename, then prompt the
+        # user to confirm or override the next-iteration number.
+        source_iter = detect_iteration_from_augmented_filename(aug_path)
+        if source_iter is None:
+            print(
+                f"Could not auto-detect iteration from filename. "
+                f"Please enter the iteration of the source file (the one "
+                f"you're loading): "
+            )
+            try:
+                source_iter = int(input("  Source iteration: ").strip())
+            except ValueError:
+                print("Invalid iteration; aborting.")
+                return
+        next_iter = source_iter + 1
+        prompt = (
+            f"\nAuto-detected source iteration {source_iter}. "
+            f"This run will produce iteration {next_iter}. "
+            f"Press Enter to accept, or enter a different iteration number: "
+        )
+        user_iter = input(prompt).strip()
+        if user_iter:
+            try:
+                next_iter = int(user_iter)
+            except ValueError:
+                print("Invalid iteration; aborting.")
+                return
+        if next_iter < 1:
+            print(f"Iteration must be >= 1 (got {next_iter}); aborting.")
+            return
+
+        # ILC tuning: gain scales the residual before adding it to the
+        # next iteration's command; smoothing window low-passes the
+        # residual to suppress per-sample noise.
+        gain_input = input(
+            "\nLearning gain (default 0.5; 1.0 = full residual; "
+            "lower = more conservative): "
+        ).strip()
+        try:
+            learning_gain = float(gain_input) if gain_input else 0.5
+        except ValueError:
+            print("Invalid learning gain; aborting.")
+            return
+        if learning_gain <= 0.0:
+            print(f"Learning gain must be > 0 (got {learning_gain}); "
+                  f"aborting.")
+            return
+
+        smoothing_input = input(
+            "Residual smoothing window in samples "
+            "(default 5; 1 disables smoothing): "
+        ).strip()
+        try:
+            smoothing_window = int(smoothing_input) if smoothing_input else 5
+        except ValueError:
+            print("Invalid smoothing window; aborting.")
+            return
+        if smoothing_window < 1:
+            print(f"Smoothing window must be >= 1 (got {smoothing_window}); "
+                  f"aborting.")
+            return
+
         # Look for simulation_trajectories.npz alongside the augmented npz.
         source_dir = os.path.dirname(os.path.abspath(aug_path))
         ref_path = os.path.join(source_dir, "simulation_trajectories.npz")
@@ -876,14 +1039,20 @@ def main():
                 print(f"File not found: {ref_path}")
                 return
 
-        trajectories = load_compensated_trajectories(aug_path, ref_path)
+        trajectories = load_compensated_trajectories(
+            aug_path, ref_path,
+            learning_gain=learning_gain,
+            smoothing_window=smoothing_window,
+        )
         if not trajectories:
             print("No compensated trajectories built; aborting.")
             return
 
-        # Use a distinct output filename and tighter safety limit.
-        output_filename = "calibration_simulation_friction_compensated.npz"
+        # Output filename and tighter safety limit, both tagged with iter.
+        output_filename = shaft_filename_for_iteration(next_iter)
         force_safety_limit_mn = FORCE_SAFETY_LIMIT_COMPENSATED_MN
+        print(f"\nWriting iteration-{next_iter} shaft data to: "
+              f"{output_filename}")
 
         # Copy simulation_trajectories.npz forward into the new run's DATA_DIR
         # so compare_simulation_to_shaft.py can find it without flags.

@@ -7,9 +7,11 @@ ORCA shaft actually did when commanded with the simulation's force trajectory
 (produced by collect_simulation_data.py).
 
 Loads:
-  <data_dir>/<date>/calibration_simulation_friction.npz   (shaft data)
-  <data_dir>/<date>/simulation_trajectories.npz           (reference trajectories)
-  <data_dir>/<date>/calibration_params.yaml               (parameter snapshot)
+  <data_dir>/<date>/<shaft-file>                            (shaft data;
+      defaults to calibration_simulation_friction.npz, override with
+      --shaft-file e.g. calibration_simulation_friction_compensated.npz)
+  <data_dir>/<date>/simulation_trajectories.npz             (reference trajectories)
+  <data_dir>/<date>/calibration_params.yaml                 (parameter snapshot)
 
 For each trial, matches the shaft trial to its reference trajectory by
 (theta_init, start_position_um) and produces:
@@ -19,6 +21,8 @@ For each trial, matches the shaft trial to its reference trajectory by
 
 Usage:
   python compare_simulation_to_shaft.py --date 26_04_30-12_00_00
+  python compare_simulation_to_shaft.py --date 26_05_01-09_00_00 \\
+      --shaft-file calibration_simulation_friction_compensated.npz
 """
 
 import argparse
@@ -62,6 +66,14 @@ def _parse_args():
     p.add_argument(
         "--no-individual-plots", action="store_true",
         help="Skip per-trial plots and only produce the summary."
+    )
+    p.add_argument(
+        "--shaft-file", type=str,
+        default="calibration_simulation_friction.npz",
+        help="Filename of the shaft data npz inside the experiment dir. "
+             "Use 'calibration_simulation_friction_compensated.npz' for "
+             "compensated runs, or any other variant. "
+             "Default: calibration_simulation_friction.npz."
     )
     return p.parse_args()
 
@@ -398,7 +410,7 @@ def main():
     print(f"Loaded params from {experiment_dir}/calibration_params.yaml")
     print(f"  mass_shaft_kg = {params.get('mass_shaft_kg')}")
 
-    shaft_path = os.path.join(experiment_dir, "calibration_simulation_friction.npz")
+    shaft_path = os.path.join(experiment_dir, args.shaft_file)
     ref_path = os.path.join(experiment_dir, "simulation_trajectories.npz")
     for p in (shaft_path, ref_path):
         if not os.path.exists(p):
