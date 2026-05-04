@@ -134,9 +134,10 @@ SIM_PARAMS = {
 
 # Initial pendulum angles to sweep (rad)
 THETA_INITS = np.arange(-5 * np.pi / 6, np.pi / 2 + np.pi / 6, np.pi / 6)
+# THETA_INITS = [0]
 
 # Starting motor positions (um) — spread across range, avoiding limits
-DEFAULT_START_POSITIONS_UM = [150000, 305000, 450000]
+DEFAULT_START_POSITIONS_UM = [150000, 200000, 300000, 40000]
 
 
 # ---------------------------------------------------------------------------
