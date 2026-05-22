@@ -20,7 +20,11 @@ Use as a library by importing OrcaBridge.
 """
 
 import argparse
+import csv
+import os
+import queue
 import socket
+import statistics
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,6 +45,26 @@ class Telemetry:
     voltage_mv:    int   = 0
     errors:        int   = 0
     timestamp:     float = field(default_factory=time.time)
+
+
+@dataclass
+class ExtTelemetry:
+    """One cycle of extended telemetry: 0x64 run + read speed + read accel,
+    with per-transaction Teensy-measured timing."""
+    seq:               int   = 0
+    t_run_us:          int   = 0
+    t_speed_us:        int   = 0
+    t_accel_us:        int   = 0
+    t_total_us:        int   = 0
+    position_um:       int   = 0
+    force_mn:          int   = 0
+    power_w:           int   = 0
+    temperature_c:     int   = 0
+    voltage_mv:        int   = 0
+    errors:            int   = 0
+    shaft_speed_mmps:  int   = 0
+    shaft_accel_mmpss: int   = 0
+    arrival_time:      float = 0.0   # Mac-side time.perf_counter() when received
 
 
 class OrcaBridge:
@@ -64,6 +88,13 @@ class OrcaBridge:
         self._on_error    = on_error or self._default_on_error
         self._ack_events  = {}  # cmd_name -> threading.Event
         self._ack_lock    = threading.Lock()
+
+        # Unbounded queue of EXT_TELEMETRY samples. Tests pull from this
+        # while the receiver thread fills it. Unbounded is fine — at 1 kHz
+        # for 10 seconds that's only ~10k small dataclass instances.
+        self._ext_queue: queue.Queue[ExtTelemetry] = queue.Queue()
+        self._ext_collecting = False
+        self._ext_collect_lock = threading.Lock()
 
         self._stop  = threading.Event()
         self._rx_thread = threading.Thread(target=self._receiver, daemon=True)
@@ -108,6 +139,32 @@ class OrcaBridge:
                         voltage_mv    = int(parts[6]),
                         errors        = int(parts[7]),
                     )
+            except ValueError:
+                pass
+
+        elif tag == "EXT_TELEMETRY" and len(parts) >= 14:
+            # Format: EXT_TELEMETRY seq t_run t_speed t_accel t_total
+            #         pos force power temp voltage errors speed accel
+            try:
+                ext = ExtTelemetry(
+                    seq               = int(parts[1]),
+                    t_run_us          = int(parts[2]),
+                    t_speed_us        = int(parts[3]),
+                    t_accel_us        = int(parts[4]),
+                    t_total_us        = int(parts[5]),
+                    position_um       = int(parts[6]),
+                    force_mn          = int(parts[7]),
+                    power_w           = int(parts[8]),
+                    temperature_c     = int(parts[9]),
+                    voltage_mv        = int(parts[10]),
+                    errors            = int(parts[11]),
+                    shaft_speed_mmps  = int(parts[12]),
+                    shaft_accel_mmpss = int(parts[13]),
+                    arrival_time      = time.perf_counter(),
+                )
+                with self._ext_collect_lock:
+                    if self._ext_collecting:
+                        self._ext_queue.put(ext)
             except ValueError:
                 pass
 
@@ -166,6 +223,36 @@ class OrcaBridge:
         return self._send_and_ack(
             f"ENABLE_STREAM 1C {force_mn} {period_us}",
             "ENABLE_STREAM", timeout)
+
+    def enable_extended_force_stream(self, force_mn: int = 0,
+                                     period_us: int = 0,
+                                     timeout: float = 2.0) -> bool:
+        """Enable extended mode: each cycle does 0x64 + read speed + read accel.
+        Per-cycle timing is reported in EXT_TELEMETRY messages."""
+        return self._send_and_ack(
+            f"ENABLE_EXT_STREAM 1C {force_mn} {period_us}",
+            "ENABLE_EXT_STREAM", timeout)
+
+    def start_ext_collection(self):
+        """Start queueing incoming EXT_TELEMETRY samples for retrieval."""
+        with self._ext_collect_lock:
+            # Drain anything stale
+            while not self._ext_queue.empty():
+                try: self._ext_queue.get_nowait()
+                except queue.Empty: break
+            self._ext_collecting = True
+
+    def stop_ext_collection(self) -> list[ExtTelemetry]:
+        """Stop collection and return all queued samples in arrival order."""
+        with self._ext_collect_lock:
+            self._ext_collecting = False
+        out = []
+        while not self._ext_queue.empty():
+            try:
+                out.append(self._ext_queue.get_nowait())
+            except queue.Empty:
+                break
+        return out
 
     def enable_sleep_stream(self, period_us: int = 1000,
                             timeout: float = 2.0) -> bool:
@@ -294,12 +381,164 @@ def demo():
         bridge.close()
 
 
+def run_timing_test(duration_s: float = 10.0,
+                    force_mn: int = 0,
+                    output_prefix: str = "timing_test"):
+    """Run the extended-stream timing test for `duration_s` seconds.
+    At the end, print summary stats, save CSV of raw samples, and save
+    a PNG of histograms."""
+    print(f"=== Timing test: {duration_s}s, force={force_mn} mN, "
+          f"period=as-fast-as-possible ===\n")
+    bridge = OrcaBridge()
+
+    try:
+        if not bridge.ping():
+            print("  [FAIL] PING — is Teensy running?")
+            return
+        print("  [OK] PING")
+
+        if not bridge.connect(baud=1000000, interframe_us=100):
+            print("  [FAIL] CONNECT")
+            return
+        print("  [OK] CONNECT")
+
+        # Start collecting BEFORE enabling the stream so we don't miss the
+        # very first samples.
+        bridge.start_ext_collection()
+
+        if not bridge.enable_extended_force_stream(force_mn=force_mn, period_us=0):
+            print("  [FAIL] ENABLE_EXT_STREAM")
+            bridge.stop_ext_collection()
+            return
+        print(f"  [OK] ENABLE_EXT_STREAM — collecting for {duration_s}s …")
+
+        # Let the Teensy push samples; just sleep on the Mac side.
+        time.sleep(duration_s)
+
+        samples = bridge.stop_ext_collection()
+        print(f"  Collected {len(samples)} samples.\n")
+
+        # Clean shutdown: sleep motor, stop stream, disconnect.
+        bridge.sleep_motor()
+        time.sleep(0.05)
+        bridge.disable_stream()
+        bridge.disconnect()
+
+    finally:
+        errs = bridge.errors()
+        if errs:
+            print("=== Errors observed during run ===")
+            for ts, phase, msg in errs:
+                print(f"  t={ts:.3f}  phase={phase}  {msg}")
+        bridge.close()
+
+    if not samples:
+        print("No samples collected — nothing to analyze.")
+        return
+
+    # ---- Drop-detection via sequence numbers ----
+    seqs = [s.seq for s in samples]
+    expected_count = seqs[-1] - seqs[0] + 1
+    dropped = expected_count - len(seqs)
+    print(f"Sequence span: {seqs[0]}..{seqs[-1]} "
+          f"({expected_count} expected, {len(seqs)} received, "
+          f"{dropped} dropped on UDP)")
+
+    # ---- Stats ----
+    def summarize(label: str, values: list[int], unit: str = "µs"):
+        if not values:
+            print(f"  {label}: (no data)")
+            return
+        mean = statistics.mean(values)
+        median = statistics.median(values)
+        stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+        print(f"  {label}:")
+        print(f"    n={len(values)}  mean={mean:.2f}{unit}  "
+              f"median={median:.2f}{unit}  stdev={stdev:.2f}{unit}")
+        print(f"    min={min(values)}{unit}  max={max(values)}{unit}")
+        if len(values) >= 20:
+            q = statistics.quantiles(values, n=100)
+            print(f"    p95={q[94]:.2f}{unit}  p99={q[98]:.2f}{unit}")
+
+    print("\n=== Per-transaction timing (Teensy-measured) ===")
+    summarize("motor.run() (0x64)",       [s.t_run_us   for s in samples])
+    summarize("read shaft speed (0x03)",  [s.t_speed_us for s in samples])
+    summarize("read shaft accel (0x03)",  [s.t_accel_us for s in samples])
+    summarize("TOTAL cycle",              [s.t_total_us for s in samples])
+    duration_actual = (samples[-1].arrival_time - samples[0].arrival_time)
+    if duration_actual > 0:
+        achieved_rate = len(samples) / duration_actual
+        print(f"\n  Achieved cycle rate: {achieved_rate:.1f} Hz "
+              f"({1e6/achieved_rate:.1f} µs/cycle)")
+
+    # ---- Save CSV ----
+    csv_path = f"{output_prefix}.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["seq", "arrival_time_s",
+                    "t_run_us", "t_speed_us", "t_accel_us", "t_total_us",
+                    "position_um", "force_mn", "power_w", "temperature_c",
+                    "voltage_mv", "errors", "shaft_speed_mmps", "shaft_accel_mmpss"])
+        for s in samples:
+            w.writerow([s.seq, f"{s.arrival_time:.6f}",
+                        s.t_run_us, s.t_speed_us, s.t_accel_us, s.t_total_us,
+                        s.position_um, s.force_mn, s.power_w, s.temperature_c,
+                        s.voltage_mv, s.errors, s.shaft_speed_mmps, s.shaft_accel_mmpss])
+    print(f"\nSaved raw samples → {csv_path}")
+
+    # ---- Plot histograms ----
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed — skipping plots. (pip3 install matplotlib)")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
+
+    series = [
+        ("motor.run() (0x64)",      [s.t_run_us   for s in samples]),
+        ("read shaft speed (0x03)", [s.t_speed_us for s in samples]),
+        ("read shaft accel (0x03)", [s.t_accel_us for s in samples]),
+        ("TOTAL cycle",             [s.t_total_us for s in samples]),
+    ]
+    for ax, (label, values) in zip(axes, series):
+        ax.hist(values, bins=60, edgecolor="black")
+        ax.set_xlabel("Time (µs)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"{label}  (n={len(values)})")
+        mean = statistics.mean(values)
+        ax.axvline(mean, color="red", linestyle="--",
+                   label=f"mean={mean:.1f} µs")
+        ax.legend()
+
+    plt.tight_layout()
+    png_path = f"{output_prefix}.png"
+    plt.savefig(png_path, dpi=100)
+    print(f"Saved plot     → {png_path}")
+    plt.show()
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--demo", action="store_true", default=True,
-                   help="Run the canned demo sequence (default)")
+    p.add_argument("--demo", action="store_true",
+                   help="Run the canned force-ramp demo")
+    p.add_argument("--timing-test", action="store_true",
+                   help="Run the extended-stream timing test")
+    p.add_argument("--duration", type=float, default=10.0,
+                   help="Duration in seconds for --timing-test (default 10)")
+    p.add_argument("--force", type=int, default=0,
+                   help="Force in mN during timing test (default 0)")
+    p.add_argument("--output", type=str, default="timing_test",
+                   help="Output filename prefix (default 'timing_test')")
     args = p.parse_args()
-    if args.demo:
+
+    if args.timing_test:
+        run_timing_test(duration_s=args.duration,
+                        force_mn=args.force,
+                        output_prefix=args.output)
+    else:
+        # Default: run the demo (preserves old behavior)
         demo()
 
 

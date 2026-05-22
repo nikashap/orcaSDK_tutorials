@@ -35,7 +35,7 @@ uint16_t  macPort = 0;
 // =====================================================================
 constexpr uint8_t  MOTOR_ADDR             = 0x01;
 constexpr uint32_t DEFAULT_BAUD           = 1000000;
-constexpr uint32_t DEFAULT_INTERFRAME_US  = 100;
+constexpr uint32_t DEFAULT_INTERFRAME_US  = 0;
 
 // Function codes
 constexpr uint8_t FC_READ_HOLDING         = 0x03;
@@ -70,6 +70,36 @@ uint32_t stream_period_us  = 0;  // stream as fast as possible
 uint32_t telemetry_period_us = 10000; // Report to Mac at 100 Hz default
 elapsedMicros since_last_stream;
 elapsedMicros since_last_telemetry;
+
+// Extended mode: each cycle does 0x64 motor.run() + read shaft speed
+// + read acceleration. Per-transaction times are recorded so we can
+// characterize the control loop floor.
+bool extended_mode = false;
+constexpr uint16_t REG_SHAFT_SPEED = 344;   // mm/s, double-wide signed
+constexpr uint16_t REG_SHAFT_ACCEL = 346;   // mm/s^2, double-wide signed
+
+// Latest extended telemetry (filled in extended mode)
+struct ExtTelemetry {
+  // From 0x64 response
+  int32_t  position_um;
+  int32_t  force_mn;
+  uint16_t power_w;
+  int8_t   temperature_c;
+  uint16_t voltage_mv;
+  uint16_t errors;
+  // From 0x03 reads
+  int32_t  shaft_speed_mmps;
+  int32_t  shaft_accel_mmpss;
+  // Per-transaction timing in microseconds
+  uint32_t t_run_us;
+  uint32_t t_speed_us;
+  uint32_t t_accel_us;
+  uint32_t t_total_us;
+  // Cycle sequence number — Python uses this to detect drops
+  uint32_t seq;
+  bool     valid;
+};
+ExtTelemetry ext = {};
 
 // Latest telemetry parsed from motor (Stream Command Response PDU, Table 6)
 struct MotorTelemetry {
@@ -123,12 +153,18 @@ void interframe_delay() {
   delayMicroseconds(current_interframe_us);
 }
 
-// Send a Modbus frame and read the response. Blocks until response_len
-// bytes arrive or timeout_us elapses. Returns bytes actually read.
-// NOTE: caller must know the expected response length.
+// Send a Modbus frame and read the response. Returns as soon as
+// expected_len bytes have arrived, or when timeout_us elapses since the
+// last received byte (whichever comes first).
+//
+// Pass expected_len = 0 if you don't know the response size in advance —
+// the function will then fall back to byte-gap timeout, but that wastes
+// timeout_us at the end of every transaction. For Modbus, you almost
+// always know the length, so pass it.
 int modbus_transact(const uint8_t* tx, size_t tx_len,
                     uint8_t* rx, size_t rx_max,
-                    uint32_t timeout_us) {
+                    uint32_t timeout_us,
+                    size_t expected_len = 0) {
   interframe_delay();
 
   // Flush any stale RX bytes.
@@ -139,13 +175,12 @@ int modbus_transact(const uint8_t* tx, size_t tx_len,
 
   elapsedMicros t;
   size_t got = 0;
-  while (t < timeout_us && got < rx_max) {
+  size_t target = (expected_len > 0 && expected_len <= rx_max) ? expected_len : rx_max;
+  while (t < timeout_us && got < target) {
     if (Serial1.available()) {
       rx[got++] = Serial1.read();
-      t = 0; // restart timeout on each received byte (byte-gap timeout)
-      if (got >= rx_max) break;
-      // If we've received the minimum frame (5 bytes: addr + fc + ... + crc16)
-      // and there's an inter-byte gap, we're likely done.
+      t = 0;  // restart byte-gap timer
+      if (got >= target) break;
     }
   }
   return got;
@@ -164,6 +199,37 @@ size_t build_write_single(uint8_t* buf, uint16_t addr, uint16_t value) {
   buf[4] = (value >> 8) & 0xFF;
   buf[5] = value & 0xFF;
   return append_crc(buf, 6);
+}
+
+// 0x03 Read Holding Registers
+size_t build_read_holding(uint8_t* buf, uint16_t addr, uint16_t count) {
+  buf[0] = MOTOR_ADDR;
+  buf[1] = FC_READ_HOLDING;
+  buf[2] = (addr >> 8) & 0xFF;
+  buf[3] = addr & 0xFF;
+  buf[4] = (count >> 8) & 0xFF;
+  buf[5] = count & 0xFF;
+  return append_crc(buf, 6);
+}
+
+// Parse a Read Holding Registers response that returns exactly 2 registers
+// (4 data bytes) encoded as a little-endian 32-bit value per the user
+// guide convention "high register address holds the upper bytes".
+// Expected response: addr(1) + fc(1) + bytecount(1) + 4 data + crc(2) = 9 bytes.
+//   data[0..1] = register at addr   (low word)
+//   data[2..3] = register at addr+1 (high word)
+// Result = (high << 16) | low, interpreted as int32_t.
+bool parse_read_holding_2reg_int32(const uint8_t* buf, size_t len, int32_t* out) {
+  if (len != 9)                   return false;
+  if (buf[0] != MOTOR_ADDR)       return false;
+  if (buf[1] != FC_READ_HOLDING)  return false;
+  if (buf[2] != 4)                return false;
+  if (!check_crc(buf, len))       return false;
+  uint16_t lo = ((uint16_t)buf[3] << 8) | buf[4];
+  uint16_t hi = ((uint16_t)buf[5] << 8) | buf[6];
+  uint32_t v  = ((uint32_t)hi << 16) | lo;
+  *out = (int32_t)v;
+  return true;
 }
 
 // 0x41 Manage High-Speed Stream
@@ -236,7 +302,7 @@ bool verify_motor_present() {
   size_t tx_len = append_crc(tx, 6);
 
   uint8_t rx[32];
-  int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 50000);
+  int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 50000, 9);
 
   // Diagnostic: report what we actually received so we can tell whether
   // the motor is silent, garbled, or returning a Modbus exception.
@@ -328,6 +394,31 @@ void send_telemetry() {
   send_udp(buf);
 }
 
+// Extended-mode telemetry: one packet per cycle, including per-transaction
+// timing. Format:
+//   EXT_TELEMETRY <seq> <t_run_us> <t_speed_us> <t_accel_us> <t_total_us>
+//                 <pos_um> <force_mn> <power_w> <temp_c> <voltage_mv> <errors>
+//                 <speed_mmps> <accel_mmpss>
+void send_ext_telemetry() {
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+    "EXT_TELEMETRY %lu %lu %lu %lu %lu %ld %ld %u %d %u %u %ld %ld",
+    (unsigned long)ext.seq,
+    (unsigned long)ext.t_run_us,
+    (unsigned long)ext.t_speed_us,
+    (unsigned long)ext.t_accel_us,
+    (unsigned long)ext.t_total_us,
+    (long)ext.position_um,
+    (long)ext.force_mn,
+    (unsigned)ext.power_w,
+    (int)ext.temperature_c,
+    (unsigned)ext.voltage_mv,
+    (unsigned)ext.errors,
+    (long)ext.shaft_speed_mmps,
+    (long)ext.shaft_accel_mmpss);
+  send_udp(buf);
+}
+
 // =====================================================================
 // Command handlers
 // =====================================================================
@@ -360,7 +451,7 @@ void cmd_connect(uint32_t baud, uint16_t delay_us) {
   uint8_t tx[16];
   uint8_t rx[16];
   size_t tx_len = build_manage_stream(tx, true, baud, delay_us);
-  int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 100000);
+  int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 100000, 12);
 
   if (n != 12 || !check_crc(rx, n)
       || rx[0] != MOTOR_ADDR
@@ -371,7 +462,8 @@ void cmd_connect(uint32_t baud, uint16_t delay_us) {
     return;
   }
 
-  // Report the realized baud/delay
+  // Report the realized baud/delay — the motor may not honor the exact
+  // request (e.g. it picks the closest achievable baud).
   // Per the example frame on page 16, the response echoes the full
   // request (12 bytes), so baud occupies rx[4..7] and delay rx[8..9],
   // NOT rx[3..6] / rx[7..8] as Table 4 implies.
@@ -416,9 +508,33 @@ void cmd_enable_stream(uint8_t sub_code, int32_t data, uint32_t period_us) {
   stream_data  = data;
   stream_period_us = period_us;
   streaming    = true;
+  extended_mode = false;
   phase        = Phase::STREAMING;
   since_last_stream = stream_period_us; // fire immediately
   send_ack("ENABLE_STREAM");
+}
+
+// Like ENABLE_STREAM but each cycle does three Modbus transactions:
+//   1. 0x64 motor.run() — sends current force/position/sleep command
+//   2. 0x03 read shaft speed (32-bit, mm/s)
+//   3. 0x03 read shaft acceleration (32-bit, mm/s^2)
+// Sub-transaction timing is recorded per cycle and reported in EXT_TELEMETRY.
+// stream_period_us = 0 means "as fast as possible" — each cycle starts
+// immediately after the previous completes.
+void cmd_enable_extended_stream(uint8_t sub_code, int32_t data, uint32_t period_us) {
+  if (phase != Phase::CONNECT && phase != Phase::STREAM_ENABLED) {
+    send_error("ENABLE_REQUIRES_CONNECT");
+    return;
+  }
+  stream_sub   = sub_code;
+  stream_data  = data;
+  stream_period_us = period_us;
+  streaming    = true;
+  extended_mode = true;
+  ext.seq      = 0;
+  phase        = Phase::STREAMING;
+  since_last_stream = stream_period_us; // fire immediately
+  send_ack("ENABLE_EXT_STREAM");
 }
 
 void cmd_set(int32_t data) {
@@ -446,6 +562,7 @@ void cmd_sleep() {
 
 void cmd_disable_stream() {
   streaming = false;
+  extended_mode = false;
   phase = Phase::STREAM_ENABLED;
   send_ack("DISABLE_STREAM");
 }
@@ -458,7 +575,7 @@ void cmd_disconnect() {
   uint8_t tx[16];
   uint8_t rx[16];
   size_t tx_len = build_manage_stream(tx, false, 0, 0);
-  modbus_transact(tx, tx_len, rx, sizeof(rx), 100000);
+  modbus_transact(tx, tx_len, rx, sizeof(rx), 100000, 12);
 
   // Whether or not it acked, drop our serial back to default.
   Serial1.end();
@@ -492,6 +609,15 @@ void handle_command(char* line) {
       uint8_t sub = (uint8_t)strtol(a, NULL, 16);
       cmd_enable_stream(sub, (int32_t)atol(b), (uint32_t)atol(c));
     } else send_error("ENABLE_BAD_ARGS");
+  }
+  else if (strcmp(tok, "ENABLE_EXT_STREAM") == 0) {
+    char* a = strtok(NULL, " \r\n");
+    char* b = strtok(NULL, " \r\n");
+    char* c = strtok(NULL, " \r\n");
+    if (a && b && c) {
+      uint8_t sub = (uint8_t)strtol(a, NULL, 16);
+      cmd_enable_extended_stream(sub, (int32_t)atol(b), (uint32_t)atol(c));
+    } else send_error("ENABLE_EXT_BAD_ARGS");
   }
   else if (strcmp(tok, "SET") == 0) {
     char* a = strtok(NULL, " \r\n");
@@ -539,38 +665,102 @@ void loop() {
     }
   }
 
-  // ---- Send next Modbus stream frame on schedule ----
+  // ---- Send next Modbus stream frame(s) on schedule ----
   if (streaming && since_last_stream >= stream_period_us) {
     since_last_stream = 0;
 
     uint8_t tx[16];
     uint8_t rx[32];
-    size_t tx_len = build_motor_stream(tx, stream_sub, stream_data);
 
-    int n = modbus_transact(tx, tx_len, rx, sizeof(rx),
-                            stream_period_us > 5000 ? stream_period_us : 5000);
+    if (extended_mode) {
+      // === EXTENDED MODE: 0x64 + read speed + read accel, per cycle ===
+      elapsedMicros cycle_t;
 
-    if (n == 19 && parse_motor_stream_response(rx, n)) {
-      // Push error immediately on rising edge (errors != 0).
-      static uint16_t last_errors = 0;
-      if (tele.errors != 0 && tele.errors != last_errors) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "MOTOR_ERR_REG=0x%04X", tele.errors);
-        send_error(msg);
+      // ---- Tx1: 0x64 motor.run() ----
+      elapsedMicros t1;
+      size_t tx_len = build_motor_stream(tx, stream_sub, stream_data);
+      int n1 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 19);
+      ext.t_run_us = (uint32_t)t1;
+      bool ok_run = (n1 == 19) && parse_motor_stream_response(rx, n1);
+      if (ok_run) {
+        ext.position_um   = tele.position_um;
+        ext.force_mn      = tele.force_mn;
+        ext.power_w       = tele.power_w;
+        ext.temperature_c = tele.temperature_c;
+        ext.voltage_mv    = tele.voltage_mv;
+        ext.errors        = tele.errors;
       }
-      last_errors = tele.errors;
+
+      // ---- Tx2: 0x03 read shaft speed (2 regs, 32-bit) ----
+      elapsedMicros t2;
+      tx_len = build_read_holding(tx, REG_SHAFT_SPEED, 2);
+      int n2 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
+      ext.t_speed_us = (uint32_t)t2;
+      bool ok_speed = parse_read_holding_2reg_int32(rx, n2, &ext.shaft_speed_mmps);
+
+      // ---- Tx3: 0x03 read shaft acceleration (2 regs, 32-bit) ----
+      elapsedMicros t3;
+      tx_len = build_read_holding(tx, REG_SHAFT_ACCEL, 2);
+      int n3 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
+      ext.t_accel_us = (uint32_t)t3;
+      bool ok_accel = parse_read_holding_2reg_int32(rx, n3, &ext.shaft_accel_mmpss);
+
+      ext.t_total_us = (uint32_t)cycle_t;
+      ext.seq++;
+      ext.valid = ok_run && ok_speed && ok_accel;
+
+      if (ext.valid) {
+        // Push immediately for full-rate timing data on the Mac side.
+        send_ext_telemetry();
+
+        // Error-register rising edge
+        static uint16_t last_ext_errors = 0;
+        if (ext.errors != 0 && ext.errors != last_ext_errors) {
+          char msg[64];
+          snprintf(msg, sizeof(msg), "MOTOR_ERR_REG=0x%04X", ext.errors);
+          send_error(msg);
+        }
+        last_ext_errors = ext.errors;
+      } else {
+        static elapsedMillis since_last_warn;
+        if (since_last_warn > 1000) {
+          char msg[96];
+          snprintf(msg, sizeof(msg),
+                   "EXT_CYCLE_BAD run=%d speed=%d accel=%d (lens %d %d %d)",
+                   ok_run, ok_speed, ok_accel, n1, n2, n3);
+          send_error(msg);
+          since_last_warn = 0;
+        }
+      }
     } else {
-      // Bad response — likely a CRC fail, timeout, or wiring issue.
-      static elapsedMillis since_last_warn;
-      if (since_last_warn > 1000) {
-        send_error("STREAM_RESPONSE_BAD");
-        since_last_warn = 0;
+      // === BASIC MODE: single 0x64 per cycle (existing behavior) ===
+      size_t tx_len = build_motor_stream(tx, stream_sub, stream_data);
+      int n = modbus_transact(tx, tx_len, rx, sizeof(rx),
+                              stream_period_us > 5000 ? stream_period_us : 5000,
+                              19);
+
+      if (n == 19 && parse_motor_stream_response(rx, n)) {
+        static uint16_t last_errors = 0;
+        if (tele.errors != 0 && tele.errors != last_errors) {
+          char msg[64];
+          snprintf(msg, sizeof(msg), "MOTOR_ERR_REG=0x%04X", tele.errors);
+          send_error(msg);
+        }
+        last_errors = tele.errors;
+      } else {
+        static elapsedMillis since_last_warn;
+        if (since_last_warn > 1000) {
+          send_error("STREAM_RESPONSE_BAD");
+          since_last_warn = 0;
+        }
       }
     }
   }
 
   // ---- Send telemetry on schedule (independent of stream rate) ----
-  if (tele.valid && since_last_telemetry >= telemetry_period_us) {
+  // In extended mode, telemetry is pushed every cycle by send_ext_telemetry,
+  // so we skip the periodic send here.
+  if (!extended_mode && tele.valid && since_last_telemetry >= telemetry_period_us) {
     since_last_telemetry = 0;
     send_telemetry();
   }
