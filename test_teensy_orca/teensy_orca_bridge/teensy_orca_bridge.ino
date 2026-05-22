@@ -269,6 +269,10 @@ bool verify_motor_present() {
 //       e.g. "ENABLE_STREAM 1C 0 1000" for sleep stream at 1 kHz
 //       e.g. "ENABLE_STREAM 1C 1000 1000" for force=1000mN at 1 kHz
 //   SET <data>             update stream data (e.g. new force target)
+//   SLEEP                  switch active stream to Sleep sub-code (0x00) —
+//                          motor stops generating forces but stream stays
+//                          alive (avoids comms-timeout error 2048).
+//                          Call before DISABLE_STREAM for clean exit.
 //   DISABLE_STREAM
 //   DISCONNECT
 //   PING
@@ -368,6 +372,9 @@ void cmd_connect(uint32_t baud, uint16_t delay_us) {
   }
 
   // Report the realized baud/delay
+  // Per the example frame on page 16, the response echoes the full
+  // request (12 bytes), so baud occupies rx[4..7] and delay rx[8..9],
+  // NOT rx[3..6] / rx[7..8] as Table 4 implies.
   uint32_t realized_baud  = ((uint32_t)rx[4] << 24) | ((uint32_t)rx[5] << 16)
                           | ((uint32_t)rx[6] << 8)  |  (uint32_t)rx[7];
   uint16_t realized_delay = ((uint16_t)rx[8] << 8) | rx[9];
@@ -418,6 +425,23 @@ void cmd_set(int32_t data) {
   // Update the streamed data on the fly (e.g. new force target).
   stream_data = data;
   // No ACK on this hot path to keep latency low; client can rely on telemetry.
+}
+
+// Switch the active stream to Sleep mode (sub-code 0x00). The motor will
+// stop generating forces but the stream stays alive, so the communication
+// timeout (page 14 of the user guide) is NOT triggered. Call this before
+// DISABLE_STREAM / DISCONNECT to leave the motor in a clean state.
+void cmd_sleep() {
+  stream_sub  = SUB_SLEEP;
+  stream_data = 0;
+  // If we weren't streaming, we still want sleep frames flowing for a
+  // moment so the motor exits Force/Position mode cleanly.
+  if (!streaming) {
+    streaming = true;
+    phase     = Phase::STREAMING;
+    since_last_stream = stream_period_us; // fire immediately
+  }
+  send_ack("SLEEP");
 }
 
 void cmd_disable_stream() {
@@ -474,6 +498,7 @@ void handle_command(char* line) {
     if (a) cmd_set((int32_t)atol(a));
   }
   else if (strcmp(tok, "DISABLE_STREAM") == 0) cmd_disable_stream();
+  else if (strcmp(tok, "SLEEP")          == 0) cmd_sleep();
   else if (strcmp(tok, "DISCONNECT")     == 0) cmd_disconnect();
   else if (strcmp(tok, "PING")           == 0) send_ack("PING");
   else send_error("UNKNOWN_COMMAND");

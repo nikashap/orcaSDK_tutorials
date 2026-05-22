@@ -178,6 +178,12 @@ class OrcaBridge:
         # Hot path: fire-and-forget for low latency.
         self._send(f"SET {force_mn}")
 
+    def sleep_motor(self, timeout: float = 2.0) -> bool:
+        """Switch the active stream to Sleep sub-code (0x00). Motor stops
+        generating forces but the stream stays alive, so the motor doesn't
+        time out and assert error 2048. Use before disable_stream()."""
+        return self._send_and_ack("SLEEP", "SLEEP", timeout)
+
     def disable_stream(self, timeout: float = 2.0) -> bool:
         return self._send_and_ack("DISABLE_STREAM", "DISABLE_STREAM", timeout)
 
@@ -253,6 +259,16 @@ def demo():
             time.sleep(0.01)  # 100 Hz update rate from Python
         bridge.set_force(0)  # back to zero
         log_phase("RAMP", True)
+
+        # ---- Put motor to sleep before disabling stream so it exits Force
+        # Mode cleanly. Otherwise the comms-timeout timer (page 14 of the
+        # user guide) will fire and raise error 2048 once we stop streaming.
+        if not bridge.sleep_motor():
+            log_phase("SLEEP", False)
+        else:
+            log_phase("SLEEP", True)
+        # Give a few stream frames time to land at the motor.
+        time.sleep(0.05)
 
         # ---- Disable stream
         if not bridge.disable_stream():
