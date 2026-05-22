@@ -235,8 +235,21 @@ bool verify_motor_present() {
   tx[4] = 0x00; tx[5] = 0x02;  // read 2 registers
   size_t tx_len = append_crc(tx, 6);
 
-  uint8_t rx[16];
+  uint8_t rx[32];
   int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 50000);
+
+  // Diagnostic: report what we actually received so we can tell whether
+  // the motor is silent, garbled, or returning a Modbus exception.
+  char dbg[256];
+  if (n == 0) {
+    snprintf(dbg, sizeof(dbg), "INFO verify_rx: 0 bytes (motor silent)");
+  } else {
+    int off = snprintf(dbg, sizeof(dbg), "INFO verify_rx: %d bytes:", n);
+    for (int i = 0; i < n && off < (int)sizeof(dbg) - 4; i++) {
+      off += snprintf(dbg + off, sizeof(dbg) - off, " %02X", rx[i]);
+    }
+  }
+  send_udp(dbg);
 
   // Expected response: addr(1) + fc(1) + byte_count(1) + 4 data bytes + crc(2) = 9 bytes
   if (n != 9)                     return false;
@@ -354,11 +367,10 @@ void cmd_connect(uint32_t baud, uint16_t delay_us) {
     return;
   }
 
-  // Report the realized baud/delay — the motor may not honor the exact
-  // request (e.g. it picks the closest achievable baud).
-  uint32_t realized_baud  = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16)
-                          | ((uint32_t)rx[5] << 8)  |  (uint32_t)rx[6];
-  uint16_t realized_delay = ((uint16_t)rx[7] << 8) | rx[8];
+  // Report the realized baud/delay
+  uint32_t realized_baud  = ((uint32_t)rx[4] << 24) | ((uint32_t)rx[5] << 16)
+                          | ((uint32_t)rx[6] << 8)  |  (uint32_t)rx[7];
+  uint16_t realized_delay = ((uint16_t)rx[8] << 8) | rx[9];
 
   char msg[96];
   snprintf(msg, sizeof(msg), "INFO realized_baud=%lu delay_us=%u",

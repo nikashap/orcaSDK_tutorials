@@ -127,6 +127,10 @@ class OrcaBridge:
             if ev is not None:
                 ev.set()
 
+        elif tag == "INFO":
+            # Diagnostic messages from the Teensy — print so they're visible.
+            print(f"[INFO] {' '.join(parts[1:])}")
+
     # --------------------------------------------------------------
     # Internal: send + wait for ACK
     # --------------------------------------------------------------
