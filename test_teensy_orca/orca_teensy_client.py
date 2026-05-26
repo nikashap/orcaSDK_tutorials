@@ -64,6 +64,7 @@ class ExtTelemetry:
     errors:            int   = 0
     shaft_speed_mmps:  int   = 0
     shaft_accel_mmpss: int   = 0
+    rtt_seq:           int   = 0   # 0 = untagged; nonzero = Python's seq for this cycle
     arrival_time:      float = 0.0   # Mac-side time.perf_counter() when received
 
 
@@ -144,8 +145,10 @@ class OrcaBridge:
 
         elif tag == "EXT_TELEMETRY" and len(parts) >= 14:
             # Format: EXT_TELEMETRY seq t_run t_speed t_accel t_total
-            #         pos force power temp voltage errors speed accel
+            #         pos force power temp voltage errors speed accel [rtt_seq]
+            # rtt_seq is optional (older Teensy firmware doesn't send it)
             try:
+                rtt = int(parts[14]) if len(parts) >= 15 else 0
                 ext = ExtTelemetry(
                     seq               = int(parts[1]),
                     t_run_us          = int(parts[2]),
@@ -160,6 +163,7 @@ class OrcaBridge:
                     errors            = int(parts[11]),
                     shaft_speed_mmps  = int(parts[12]),
                     shaft_accel_mmpss = int(parts[13]),
+                    rtt_seq           = rtt,
                     arrival_time      = time.perf_counter(),
                 )
                 with self._ext_collect_lock:
@@ -264,6 +268,12 @@ class OrcaBridge:
     def set_force(self, force_mn: int):
         # Hot path: fire-and-forget for low latency.
         self._send(f"SET {force_mn}")
+
+    def set_force_rtt(self, rtt_seq: int, force_mn: int):
+        """Tagged variant of set_force — the next cycle's EXT_TELEMETRY
+        will echo rtt_seq, letting Python measure end-to-end RTT.
+        Fire-and-forget. rtt_seq must be > 0 (0 means 'no tag')."""
+        self._send(f"SET_RTT {rtt_seq} {force_mn}")
 
     def sleep_motor(self, timeout: float = 2.0) -> bool:
         """Switch the active stream to Sleep sub-code (0x00). Motor stops
@@ -519,24 +529,240 @@ def run_timing_test(duration_s: float = 10.0,
     plt.show()
 
 
+def run_rtt_test(duration_s: float = 10.0,
+                 send_period_ms: float = 5.0,
+                 force_amplitude_mn: int = 100,
+                 output_prefix: str = "rtt_test"):
+    """Measure end-to-end RTT: Python sends a tagged force update, the
+    Teensy applies it on its next cycle, EXT_TELEMETRY comes back tagged.
+    RTT = (telemetry_arrival - tagged_send_time).
+
+    The force value alternates between +force_amplitude_mn and
+    -force_amplitude_mn each send so that every SET_RTT actually changes
+    something — keeps the test honest. Use force_amplitude_mn = 0 to send
+    zero forces (still measures RTT, motor just stays idle).
+
+    send_period_ms controls how often Python fires a tagged update. Should
+    be larger than the Teensy's cycle floor (~1.5 ms for ext mode at 1 Mbps)
+    so each send is consumed by a fresh cycle, not collapsed with prior ones.
+    """
+    print(f"=== RTT test: duration={duration_s}s, "
+          f"send_period={send_period_ms}ms, "
+          f"force_amplitude=±{force_amplitude_mn} mN ===\n")
+    bridge = OrcaBridge()
+
+    # Map from rtt_seq → send timestamp (perf_counter)
+    sent_at: dict[int, float] = {}
+    sent_lock = threading.Lock()
+
+    try:
+        if not bridge.ping():
+            print("  [FAIL] PING — is Teensy running?")
+            return
+        print("  [OK] PING")
+
+        if not bridge.connect(baud=1000000, interframe_us=100):
+            print("  [FAIL] CONNECT")
+            return
+        print("  [OK] CONNECT")
+
+        bridge.start_ext_collection()
+
+        if not bridge.enable_extended_force_stream(force_mn=0, period_us=0):
+            print("  [FAIL] ENABLE_EXT_STREAM")
+            bridge.stop_ext_collection()
+            return
+        print(f"  [OK] ENABLE_EXT_STREAM — measuring RTT for {duration_s}s …\n")
+
+        # ---- Send tagged updates at the configured rate ----
+        rtt_seq = 0
+        send_interval_s = send_period_ms / 1000.0
+        next_send = time.perf_counter()
+        end_time  = next_send + duration_s
+
+        # Sender runs in main thread; collector in bridge's RX thread fills
+        # the queue. We pull from queue here periodically to keep memory
+        # bounded — but for 10s × 200 Hz that's only 2000 samples, fine.
+        while True:
+            now = time.perf_counter()
+            if now >= end_time:
+                break
+            if now >= next_send:
+                rtt_seq += 1
+                # Alternate the sign so the force value actually changes
+                force = force_amplitude_mn if (rtt_seq % 2) else -force_amplitude_mn
+                with sent_lock:
+                    sent_at[rtt_seq] = time.perf_counter()
+                bridge.set_force_rtt(rtt_seq, force)
+                next_send += send_interval_s
+                # If we've fallen behind, don't try to catch up — just
+                # skip to the next slot.
+                if next_send < now:
+                    next_send = now + send_interval_s
+            time.sleep(0.0002)  # 200 µs poll granularity
+
+        # Give the last few in-flight responses time to arrive
+        time.sleep(0.05)
+        samples = bridge.stop_ext_collection()
+        print(f"  Total telemetry samples received: {len(samples)}")
+        print(f"  Tagged sends:                     {rtt_seq}")
+
+        # Sleep motor & clean disconnect
+        bridge.sleep_motor()
+        time.sleep(0.05)
+        bridge.disable_stream()
+        bridge.disconnect()
+
+    finally:
+        errs = bridge.errors()
+        if errs:
+            print("\n=== Errors during run ===")
+            for ts, phase, msg in errs:
+                print(f"  t={ts:.3f}  phase={phase}  {msg}")
+        bridge.close()
+
+    if not samples:
+        print("No samples — nothing to analyze.")
+        return
+
+    # ---- Match tagged sends to their responses ----
+    rtts_us: list[float] = []
+    matched_samples: list[tuple[ExtTelemetry, float]] = []
+    untagged_count = 0
+    for s in samples:
+        if s.rtt_seq == 0:
+            untagged_count += 1
+            continue
+        with sent_lock:
+            send_time = sent_at.get(s.rtt_seq)
+        if send_time is None:
+            # Tag we didn't send (shouldn't happen unless Teensy state
+            # carried over from a prior run); skip.
+            continue
+        rtt = (s.arrival_time - send_time) * 1_000_000  # → µs
+        rtts_us.append(rtt)
+        matched_samples.append((s, rtt))
+
+    print(f"  Tagged responses matched:         {len(rtts_us)}")
+    print(f"  Untagged (intervening) cycles:    {untagged_count}")
+    if rtt_seq > len(rtts_us):
+        print(f"  Lost/unmatched tagged sends:      {rtt_seq - len(rtts_us)}")
+
+    if not rtts_us:
+        print("\nNo RTT samples to plot — was anything actually tagged?")
+        return
+
+    # ---- RTT stats ----
+    def summarize(label, values, unit="µs"):
+        if not values:
+            print(f"  {label}: (no data)")
+            return
+        mean = statistics.mean(values)
+        median = statistics.median(values)
+        stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+        print(f"  {label}:")
+        print(f"    n={len(values)}  mean={mean:.1f}{unit}  "
+              f"median={median:.1f}{unit}  stdev={stdev:.1f}{unit}")
+        print(f"    min={min(values):.1f}{unit}  max={max(values):.1f}{unit}")
+        if len(values) >= 20:
+            q = statistics.quantiles(values, n=100)
+            print(f"    p95={q[94]:.1f}{unit}  p99={q[98]:.1f}{unit}")
+
+    print("\n=== End-to-end RTT (Python send → Python receive) ===")
+    summarize("RTT", rtts_us)
+
+    # Also report Teensy-measured cycle times for context
+    print("\n=== Teensy cycle times (for reference) ===")
+    summarize("TOTAL cycle (Teensy)", [s.t_total_us for s in samples])
+
+    # ---- Save CSV ----
+    csv_path = f"{output_prefix}.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["rtt_seq", "rtt_us", "teensy_seq", "t_total_us",
+                    "t_run_us", "t_speed_us", "t_accel_us",
+                    "position_um", "force_mn", "shaft_speed_mmps",
+                    "shaft_accel_mmpss", "errors"])
+        for s, rtt in matched_samples:
+            w.writerow([s.rtt_seq, f"{rtt:.1f}",
+                        s.seq, s.t_total_us, s.t_run_us, s.t_speed_us, s.t_accel_us,
+                        s.position_um, s.force_mn,
+                        s.shaft_speed_mmps, s.shaft_accel_mmpss, s.errors])
+    print(f"\nSaved raw → {csv_path}")
+
+    # ---- Plot ----
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed — skipping plot. (pip3 install matplotlib)")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Panel 1: RTT histogram
+    axes[0].hist(rtts_us, bins=60, edgecolor="black")
+    axes[0].set_xlabel("Round-trip time (µs)")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title(f"End-to-end RTT  (n={len(rtts_us)})")
+    mean = statistics.mean(rtts_us)
+    axes[0].axvline(mean, color="red", linestyle="--",
+                    label=f"mean={mean:.0f} µs")
+    axes[0].legend()
+
+    # Panel 2: Teensy cycle time histogram (for comparison)
+    cycle_us = [s.t_total_us for s in samples]
+    axes[1].hist(cycle_us, bins=60, edgecolor="black")
+    axes[1].set_xlabel("Teensy cycle time (µs)")
+    axes[1].set_ylabel("Count")
+    axes[1].set_title(f"Teensy cycle  (n={len(cycle_us)})")
+    mean_c = statistics.mean(cycle_us)
+    axes[1].axvline(mean_c, color="red", linestyle="--",
+                    label=f"mean={mean_c:.0f} µs")
+    axes[1].legend()
+
+    plt.tight_layout()
+    png_path = f"{output_prefix}.png"
+    plt.savefig(png_path, dpi=100)
+    print(f"Saved plot → {png_path}")
+    plt.show()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--demo", action="store_true",
                    help="Run the canned force-ramp demo")
     p.add_argument("--timing-test", action="store_true",
-                   help="Run the extended-stream timing test")
+                   help="Run the extended-stream timing test "
+                        "(Teensy-side per-transaction timing)")
+    p.add_argument("--rtt-test", action="store_true",
+                   help="Run the end-to-end RTT test "
+                        "(Python send → Python receive)")
     p.add_argument("--duration", type=float, default=10.0,
-                   help="Duration in seconds for --timing-test (default 10)")
+                   help="Duration in seconds (default 10)")
     p.add_argument("--force", type=int, default=0,
-                   help="Force in mN during timing test (default 0)")
-    p.add_argument("--output", type=str, default="timing_test",
-                   help="Output filename prefix (default 'timing_test')")
+                   help="Force in mN for --timing-test (default 0), "
+                        "or amplitude for --rtt-test (default 100 if 0)")
+    p.add_argument("--send-period-ms", type=float, default=5.0,
+                   help="Tagged-send interval for --rtt-test (default 5.0 ms)")
+    p.add_argument("--output", type=str, default=None,
+                   help="Output filename prefix "
+                        "(default: 'timing_test' or 'rtt_test' depending on mode)")
     args = p.parse_args()
 
-    if args.timing_test:
+    if args.rtt_test:
+        prefix = args.output or "rtt_test"
+        # For RTT test, default a nonzero force amplitude so each tagged
+        # send actually does something
+        amplitude = args.force if args.force != 0 else 100
+        run_rtt_test(duration_s=args.duration,
+                     send_period_ms=args.send_period_ms,
+                     force_amplitude_mn=amplitude,
+                     output_prefix=prefix)
+    elif args.timing_test:
+        prefix = args.output or "timing_test"
         run_timing_test(duration_s=args.duration,
                         force_mn=args.force,
-                        output_prefix=args.output)
+                        output_prefix=prefix)
     else:
         # Default: run the demo (preserves old behavior)
         demo()

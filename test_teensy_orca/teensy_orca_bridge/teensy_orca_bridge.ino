@@ -35,7 +35,7 @@ uint16_t  macPort = 0;
 // =====================================================================
 constexpr uint8_t  MOTOR_ADDR             = 0x01;
 constexpr uint32_t DEFAULT_BAUD           = 1000000;
-constexpr uint32_t DEFAULT_INTERFRAME_US  = 0;
+constexpr uint32_t DEFAULT_INTERFRAME_US  = 100;
 
 // Function codes
 constexpr uint8_t FC_READ_HOLDING         = 0x03;
@@ -97,9 +97,17 @@ struct ExtTelemetry {
   uint32_t t_total_us;
   // Cycle sequence number — Python uses this to detect drops
   uint32_t seq;
+  // RTT-test tag: if a SET_RTT arrived since the last cycle, the next
+  // cycle stamps this with the tag (Python's sequence number) so Python
+  // can match the cycle that consumed this force update. 0 = untagged.
+  uint32_t rtt_seq;
   bool     valid;
 };
 ExtTelemetry ext = {};
+
+// Pending RTT tag from the most recent SET_RTT — consumed and zeroed at
+// the start of the next streaming cycle.
+volatile uint32_t pending_rtt_seq = 0;
 
 // Latest telemetry parsed from motor (Stream Command Response PDU, Table 6)
 struct MotorTelemetry {
@@ -398,11 +406,13 @@ void send_telemetry() {
 // timing. Format:
 //   EXT_TELEMETRY <seq> <t_run_us> <t_speed_us> <t_accel_us> <t_total_us>
 //                 <pos_um> <force_mn> <power_w> <temp_c> <voltage_mv> <errors>
-//                 <speed_mmps> <accel_mmpss>
+//                 <speed_mmps> <accel_mmpss> <rtt_seq>
+// rtt_seq = 0 means this cycle wasn't tagged; nonzero means it consumed
+// the SET_RTT with that Python-side sequence number.
 void send_ext_telemetry() {
   char buf[256];
   snprintf(buf, sizeof(buf),
-    "EXT_TELEMETRY %lu %lu %lu %lu %lu %ld %ld %u %d %u %u %ld %ld",
+    "EXT_TELEMETRY %lu %lu %lu %lu %lu %ld %ld %u %d %u %u %ld %ld %lu",
     (unsigned long)ext.seq,
     (unsigned long)ext.t_run_us,
     (unsigned long)ext.t_speed_us,
@@ -415,7 +425,8 @@ void send_ext_telemetry() {
     (unsigned)ext.voltage_mv,
     (unsigned)ext.errors,
     (long)ext.shaft_speed_mmps,
-    (long)ext.shaft_accel_mmpss);
+    (long)ext.shaft_accel_mmpss,
+    (unsigned long)ext.rtt_seq);
   send_udp(buf);
 }
 
@@ -543,6 +554,15 @@ void cmd_set(int32_t data) {
   // No ACK on this hot path to keep latency low; client can rely on telemetry.
 }
 
+// Tagged variant of SET: update the force AND mark the next cycle with
+// the given sequence number so Python can identify which cycle consumed
+// this update. Used to measure end-to-end RTT.
+// No ACK — fire-and-forget on the hot path, just like SET.
+void cmd_set_rtt(uint32_t rtt_seq, int32_t data) {
+  stream_data = data;
+  pending_rtt_seq = rtt_seq;
+}
+
 // Switch the active stream to Sleep mode (sub-code 0x00). The motor will
 // stop generating forces but the stream stays alive, so the communication
 // timeout (page 14 of the user guide) is NOT triggered. Call this before
@@ -623,6 +643,13 @@ void handle_command(char* line) {
     char* a = strtok(NULL, " \r\n");
     if (a) cmd_set((int32_t)atol(a));
   }
+  else if (strcmp(tok, "SET_RTT") == 0) {
+    // SET_RTT <python_seq> <force>
+    char* a = strtok(NULL, " \r\n");
+    char* b = strtok(NULL, " \r\n");
+    if (a && b) cmd_set_rtt((uint32_t)strtoul(a, NULL, 10),
+                            (int32_t)atol(b));
+  }
   else if (strcmp(tok, "DISABLE_STREAM") == 0) cmd_disable_stream();
   else if (strcmp(tok, "SLEEP")          == 0) cmd_sleep();
   else if (strcmp(tok, "DISCONNECT")     == 0) cmd_disconnect();
@@ -675,6 +702,16 @@ void loop() {
     if (extended_mode) {
       // === EXTENDED MODE: 0x64 + read speed + read accel, per cycle ===
       elapsedMicros cycle_t;
+
+      // Atomically grab any pending RTT tag from SET_RTT. This cycle
+      // consumes the most recent SET_RTT force update (stream_data was
+      // already updated when SET_RTT arrived). pending_rtt_seq=0 means
+      // no SET_RTT arrived since the last cycle.
+      noInterrupts();
+      uint32_t tag = pending_rtt_seq;
+      pending_rtt_seq = 0;
+      interrupts();
+      ext.rtt_seq = tag;
 
       // ---- Tx1: 0x64 motor.run() ----
       elapsedMicros t1;
