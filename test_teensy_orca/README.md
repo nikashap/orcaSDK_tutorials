@@ -1,6 +1,6 @@
 # Cart-Pole Physics Validation Suite
 
-Validates the Teensy 4.1 semi-implicit Euler integrator against a high-accuracy
+Validates the Teensy 4.1 RK4 integrator against a high-accuracy
 `scipy.integrate.solve_ivp` (DOP853) reference for the cart-pole dynamics.
 
 ## Hardware
@@ -44,7 +44,7 @@ Plots and results are saved to `results/`.
 | 7 | `sinusoidal_drive` | Time-varying forcing |
 | 8 | `near_upright` | Unstable equilibrium fallaway |
 | 9 | `x_offset_sweep` | Translational invariance (exact) |
-| 10 | `convergence` | First-order error scaling (log-log slope) |
+| 10 | `convergence` | First-order error scaling (log-log slope) | NOTE: this convergence test is currently incorrect because it's based on Euler and not RK4
 
 ## Files
 
