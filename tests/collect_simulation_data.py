@@ -43,13 +43,8 @@ XML_FILEPATH = '~/Documents/nikashap/cartpole-target/orca/cartpendulum-orca.xml'
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARAMS_PATH = os.path.join(_SCRIPT_DIR, "calibration_params.yaml")
 
-FORCE_SAFETY_LIMIT_MN = 60000
-
-# Different safety limit for compensated replays: friction-compensated commands
-# can exceed the original commanded force in magnitude, so we cap them lower
-# than the standard limit to keep the motor in a safe envelope.
+FORCE_SAFETY_LIMIT_MN = 70000
 FORCE_SAFETY_LIMIT_COMPENSATED_MN = 70000
-
 
 # ---------------------------------------------------------------------------
 # Iteration / filename conventions (must match estimate_friction_from_simulation.py)
@@ -133,11 +128,276 @@ SIM_PARAMS = {
 }
 
 # Initial pendulum angles to sweep (rad)
-THETA_INITS = np.arange(-5 * np.pi / 6, np.pi / 2 + np.pi / 6, np.pi / 6)
+THETA_INITS = np.arange(-4 * np.pi / 6, 4 * np.pi/6, np.pi / 6)
 # THETA_INITS = [0]
 
 # Starting motor positions (um) — spread across range, avoiding limits
 DEFAULT_START_POSITIONS_UM = [150000, 200000, 300000, 40000]
+
+# Trajectory position bounds (metres, simulation frame)
+X_MIN_M = (MOTOR_MIN_UM + SAFETY_MARGIN_UM - MOTOR_CENTER_UM) * 1e-6
+X_MAX_M = (MOTOR_MAX_UM - SAFETY_MARGIN_UM - MOTOR_CENTER_UM) * 1e-6
+T_TOTAL_S = CTRL_LOOP_DURATION_S * SIM_PARAMS["max_episode_steps"]
+
+
+# ---------------------------------------------------------------------------
+# Sinusoidal trajectory generation
+# ---------------------------------------------------------------------------
+
+def sinusoidal_trajectory(t, a1, a2, a3, b1, b2, b3, c1):
+    """Compute position, velocity, acceleration for x(t) = c1 + a1*sin(a2*t+a3) + b1*cos(b2*t+b3)."""
+    t = np.asarray(t, dtype=np.float64)
+    sin_arg = a2 * t + a3
+    cos_arg = b2 * t + b3
+    x = c1 + a1 * np.sin(sin_arg) + b1 * np.cos(cos_arg)
+    x_dot = a1 * a2 * np.cos(sin_arg) - b1 * b2 * np.sin(cos_arg)
+    x_ddot = -a1 * a2**2 * np.sin(sin_arg) - b1 * b2**2 * np.cos(cos_arg)
+    return x, x_dot, x_ddot
+
+
+def sample_sinusoidal_params(
+    n_trajectories,
+    x_min_m=X_MIN_M,
+    x_max_m=X_MAX_M,
+    accel_limit_mps2=None,
+    freq_range_hz=(0.3, 4.0),
+    amplitude_range_m=(0.01, 0.2),
+    c1=0.0,
+    seed=42,
+    max_attempts_per_traj=200,
+):
+    """Rejection-sample sinusoidal trajectory parameters within motor bounds.
+
+    Returns list of dicts with keys: a1, a2, a3, b1, b2, b3, c1, start_position_um.
+    """
+    if accel_limit_mps2 is None:
+        accel_limit_mps2 = (FORCE_SAFETY_LIMIT_MN * 1e-3) / PARAMS["mass_shaft_kg"]
+
+    rng = np.random.default_rng(seed)
+    half_range = (x_max_m - x_min_m) / 2.0
+    omega_min = 2 * np.pi * freq_range_hz[0]
+    omega_max = 2 * np.pi * freq_range_hz[1]
+
+    params_list = []
+    total_attempts = 0
+
+    while len(params_list) < n_trajectories:
+        total_attempts += 1
+        if total_attempts > n_trajectories * max_attempts_per_traj:
+            print(f"WARNING: hit max attempts ({total_attempts}), "
+                  f"only generated {len(params_list)}/{n_trajectories}")
+            break
+
+        a1 = rng.uniform(*amplitude_range_m)
+        b1 = rng.uniform(*amplitude_range_m)
+        if a1 + b1 >= half_range * 0.95:
+            continue
+
+        a2 = rng.uniform(omega_min, omega_max)
+        b2 = rng.uniform(omega_min, omega_max)
+        if a1 * a2**2 + b1 * b2**2 > accel_limit_mps2 * 0.9:
+            continue
+
+        a3 = rng.uniform(0, 2 * np.pi)
+        b3 = rng.uniform(0, 2 * np.pi)
+
+        c1_min = x_min_m + a1 + b1
+        c1_max = x_max_m - a1 - b1
+        if c1_min >= c1_max:
+            continue
+        if c1 is not None:
+            actual_c1 = c1
+        else:
+            actual_c1 = rng.uniform(c1_min, c1_max)
+        if actual_c1 < c1_min or actual_c1 > c1_max:
+            continue
+
+        x0 = actual_c1 + a1 * np.sin(a3) + b1 * np.cos(b3)
+        start_position_um = int(x0 * 1e6 + MOTOR_CENTER_UM)
+
+        params_list.append({
+            "a1": a1, "a2": a2, "a3": a3,
+            "b1": b1, "b2": b2, "b3": b3,
+            "c1": actual_c1,
+            "start_position_um": start_position_um,
+        })
+
+    print(f"Generated {len(params_list)} sinusoidal parameter sets "
+          f"(acceptance rate: {len(params_list)/max(total_attempts, 1):.1%})")
+    return params_list
+
+
+def run_imposed_trajectory(env, traj_dict, dt=None):
+    """Step the simulation with the cart constrained to follow x(t).
+
+    Returns dict with pend_theta, pend_thetadot, sim_ctrl_N, sim_env_N.
+    sim_ctrl_N is the total control input (N).
+    sim_env_N is the environment force on the cart (pendulum coupling + passive),
+    i.e. ctrl = M[0,0]*x_ddot + sim_env_N.
+    """
+    if dt is None:
+        dt = CTRL_LOOP_DURATION_S
+
+    model = env.unwrapped.model
+    data = env.unwrapped.data
+
+    x_arr = traj_dict["x_m"] if "x_m" in traj_dict else traj_dict["sim_cart_x"]
+    xdot_arr = traj_dict["x_dot_mps"] if "x_dot_mps" in traj_dict else traj_dict["sim_cart_xdot"]
+    xddot_arr = traj_dict["x_ddot_mps2"] if "x_ddot_mps2" in traj_dict else traj_dict["sim_cart_xddot"]
+    n_steps = len(x_arr)
+
+    pend_theta = np.zeros(n_steps)
+    pend_thetadot = np.zeros(n_steps)
+    sim_ctrl = np.zeros(n_steps)
+    sim_env = np.zeros(n_steps)
+
+    env.reset()
+    data.qpos[0] = x_arr[0]
+    data.qpos[1] = 0.0
+    data.qvel[0] = xdot_arr[0]
+    data.qvel[1] = 0.0
+    mujoco.mj_forward(model, data)
+
+    nv = model.nv
+    M = np.zeros((nv, nv))
+    rhs = np.zeros(nv)
+
+    for i in range(n_steps):
+        pend_theta[i] = data.qpos[1]
+        pend_thetadot[i] = data.qvel[1]
+
+        data.qpos[0] = x_arr[i]
+        data.qvel[0] = xdot_arr[i]
+
+        data.ctrl[0] = 0.0
+        mujoco.mj_forward(model, data)
+
+        M[:] = 0.0
+        mujoco.mj_fullM(model, M, data.qM)
+        np.subtract(data.qfrc_passive, data.qfrc_bias, out=rhs)
+        np.add(rhs, data.qfrc_applied, out=rhs)
+        np.add(rhs, data.qfrc_constraint, out=rhs)
+
+        a_cart = xddot_arr[i]
+        a_theta = (rhs[1] - M[1, 0] * a_cart) / M[1, 1]
+
+        ctrl = M[0, 0] * a_cart + M[0, 1] * a_theta - rhs[0]
+        sim_ctrl[i] = ctrl
+        sim_env[i] = M[0, 1] * a_theta - rhs[0]
+
+        data.ctrl[0] = ctrl
+        mujoco.mj_step(model, data)
+
+        if i + 1 < n_steps:
+            data.qpos[0] = x_arr[i + 1]
+            data.qvel[0] = xdot_arr[i + 1]
+
+    return {
+        "pend_theta": pend_theta,
+        "pend_thetadot": pend_thetadot,
+        "sim_ctrl_N": sim_ctrl,
+        "sim_env_N": sim_env,
+    }
+
+
+def generate_sinusoidal_trajectories(
+    n_trajectories=20,
+    seed=123,
+    freq_range_hz=(0.3, 4.0),
+    amplitude_range_m=(0.01, 0.2),
+    c1=0.0,
+    sim_params=None,
+):
+    """Generate sinusoidal cart trajectories with both ctrl and env force profiles.
+
+    For each trajectory, produces TWO entries:
+      - force_type="ctrl": F = mass_shaft * x_ddot * 1e3 mN (exact cart accel)
+      - force_type="env":  F = sim_env_N * 1e3 mN (pendulum coupling force)
+
+    Returns a list of trajectory dicts compatible with run_simulation_trial.
+    """
+    if sim_params is None:
+        sim_params = SIM_PARAMS
+    mass_shaft_kg = PARAMS["mass_shaft_kg"]
+
+    params_list = sample_sinusoidal_params(
+        n_trajectories, seed=seed,
+        freq_range_hz=freq_range_hz,
+        amplitude_range_m=amplitude_range_m,
+        c1=c1,
+    )
+
+    env = gym.make(
+        'HardwareEnv-v0',
+        xml_file=XML_FILEPATH,
+        max_episode_steps=sim_params["max_episode_steps"],
+        frame_skip=1,
+        render_mode="rgb_array",
+        mass_cart=sim_params["mass_cart"],
+        mass_bob=sim_params["mass_bob"],
+        pendulum_length=sim_params["pendulum_length"],
+        mass_rod=sim_params["mass_rod"],
+        mass_shaft=sim_params["mass_shaft"],
+        pendulum_damping=sim_params["pendulum_damping"],
+        cart_damping=sim_params["cart_damping"],
+    )
+
+    t = np.arange(0, T_TOTAL_S, CTRL_LOOP_DURATION_S)
+    trajectories = []
+    total = len(params_list)
+
+    print(f"\nGenerating {total} sinusoidal trajectories × 2 force types "
+          f"({total * 2} total trials)...")
+
+    for i, p in enumerate(params_list):
+        x, x_dot, x_ddot = sinusoidal_trajectory(
+            t, p['a1'], p['a2'], p['a3'],
+            p['b1'], p['b2'], p['b3'], p['c1'],
+        )
+
+        traj_dict = {"x_m": x, "x_dot_mps": x_dot, "x_ddot_mps2": x_ddot}
+        sim_result = run_imposed_trajectory(env, traj_dict)
+
+        F_ctrl_mN = mass_shaft_kg * x_ddot * 1e3
+        F_env_mN = sim_result["sim_env_N"] * 1e3
+
+        common = {
+            "theta_init": 0.0,
+            "start_position_um": p["start_position_um"],
+            "sim_cart_x": x,
+            "sim_cart_xdot": x_dot,
+            "sim_cart_xddot": x_ddot,
+            "sim_pend_theta": sim_result["pend_theta"],
+            "sim_pend_thetadot": sim_result["pend_thetadot"],
+            "sim_env_N": sim_result["sim_env_N"],
+            "sim_timestep_s": CTRL_LOOP_DURATION_S,
+            "trajectory_type": "sinusoidal",
+            "traj_id": i,
+        }
+
+        trajectories.append({
+            **common,
+            "force_commands_mN": F_ctrl_mN,
+            "force_type": "ctrl",
+            "n_steps": len(t),
+        })
+        trajectories.append({
+            **common,
+            "force_commands_mN": F_env_mN,
+            "force_type": "env",
+            "n_steps": len(t),
+        })
+
+        freq_sin = p['a2'] / (2 * np.pi)
+        freq_cos = p['b2'] / (2 * np.pi)
+        print(f"  [{i+1:3d}/{total}] a1={p['a1']:.3f}m @ {freq_sin:.1f}Hz, "
+              f"b1={p['b1']:.3f}m @ {freq_cos:.1f}Hz, "
+              f"start={p['start_position_um']}µm, "
+              f"max|F_ctrl|={np.abs(F_ctrl_mN).max():.0f}mN, "
+              f"max|F_env|={np.abs(F_env_mN).max():.0f}mN")
+
+    env.close()
+    return trajectories
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +617,9 @@ def generate_trajectories(theta_inits=THETA_INITS,
                 "sim_pend_thetadot": np.array(sim_pend_thetadot, dtype=np.float64),
                 "sim_timestep_s": sim_timestep_s,
                 "n_steps": len(force_commands),
+                "trajectory_type": "pendulum_drop",
+                "force_type": "ctrl",
+                "traj_id": idx - 1,
             })
 
     env.close()
@@ -369,8 +632,7 @@ def save_trajectories(trajectories, filepath):
     traj_n_steps = np.array([t["n_steps"] for t in trajectories], dtype=np.int32)
     traj_boundaries = np.concatenate([[0], np.cumsum(traj_n_steps)])
 
-    np.savez(
-        filepath,
+    save_dict = dict(
         n_trajectories=n_traj,
         sim_timestep_s=trajectories[0]["sim_timestep_s"],
         mass_shaft_kg=PARAMS["mass_shaft_kg"],
@@ -385,6 +647,12 @@ def save_trajectories(trajectories, filepath):
                                         dtype=np.int32),
         traj_n_steps=traj_n_steps,
         traj_boundaries=traj_boundaries,
+        traj_trajectory_type=np.array([t.get("trajectory_type", "pendulum_drop")
+                                       for t in trajectories], dtype="U20"),
+        traj_force_type=np.array([t.get("force_type", "ctrl")
+                                  for t in trajectories], dtype="U10"),
+        traj_traj_id=np.array([t.get("traj_id", i)
+                               for i, t in enumerate(trajectories)], dtype=np.int32),
         # Concatenated per-step arrays
         force_commands_mN=np.concatenate([t["force_commands_mN"] for t in trajectories]),
         sim_cart_x=np.concatenate([t["sim_cart_x"] for t in trajectories]),
@@ -393,6 +661,12 @@ def save_trajectories(trajectories, filepath):
         sim_pend_theta=np.concatenate([t["sim_pend_theta"] for t in trajectories]),
         sim_pend_thetadot=np.concatenate([t["sim_pend_thetadot"] for t in trajectories]),
     )
+    # Store environment force if available (sinusoidal trajectories)
+    if any("sim_env_N" in t for t in trajectories):
+        save_dict["sim_env_N"] = np.concatenate([
+            t.get("sim_env_N", np.zeros(t["n_steps"])) for t in trajectories
+        ])
+    np.savez(filepath, **save_dict)
 
     global_max = max(np.max(np.abs(t["force_commands_mN"])) for t in trajectories)
     print(f"\nSaved {n_traj} trajectories to {filepath}")
@@ -403,14 +677,19 @@ def save_trajectories(trajectories, filepath):
 
 def load_trajectories(filepath):
     """Load pre-computed trajectories from .npz."""
-    d = np.load(filepath)
+    d = np.load(filepath, allow_pickle=True)
     n_traj = int(d["n_trajectories"])
     boundaries = d["traj_boundaries"]
+
+    has_type = "traj_trajectory_type" in d
+    has_force = "traj_force_type" in d
+    has_traj_id = "traj_traj_id" in d
+    has_env = "sim_env_N" in d
 
     trajectories = []
     for i in range(n_traj):
         lo, hi = int(boundaries[i]), int(boundaries[i + 1])
-        trajectories.append({
+        traj = {
             "force_commands_mN": d["force_commands_mN"][lo:hi],
             "theta_init": float(d["traj_theta_init"][i]),
             "start_position_um": int(d["traj_start_position_um"][i]),
@@ -421,9 +700,20 @@ def load_trajectories(filepath):
             "sim_pend_thetadot": d["sim_pend_thetadot"][lo:hi],
             "sim_timestep_s": float(d["sim_timestep_s"]),
             "n_steps": hi - lo,
-        })
+            "trajectory_type": str(d["traj_trajectory_type"][i]) if has_type else "pendulum_drop",
+            "force_type": str(d["traj_force_type"][i]) if has_force else "ctrl",
+            "traj_id": int(d["traj_traj_id"][i]) if has_traj_id else i,
+        }
+        if has_env:
+            traj["sim_env_N"] = d["sim_env_N"][lo:hi]
+        trajectories.append(traj)
 
-    print(f"Loaded {n_traj} trajectories from {filepath}")
+    n_types = {}
+    for t in trajectories:
+        key = f"{t['trajectory_type']}/{t['force_type']}"
+        n_types[key] = n_types.get(key, 0) + 1
+    type_summary = ", ".join(f"{k}: {v}" for k, v in n_types.items())
+    print(f"Loaded {n_traj} trajectories from {filepath} ({type_summary})")
     return trajectories
 
 
@@ -508,12 +798,15 @@ def load_compensated_trajectories(augmented_npz_path,
     boundaries = aug["trial_boundaries"]
 
     print(f"Loading reference trajectories: {reference_trajectories_path}")
-    ref = np.load(reference_trajectories_path)
+    ref = np.load(reference_trajectories_path, allow_pickle=True)
     n_ref = int(ref["n_trajectories"])
     ref_boundaries = ref["traj_boundaries"]
     sim_dt_s = float(ref["sim_timestep_s"])
     ref_thetas = ref["traj_theta_init"]
     ref_starts = ref["traj_start_position_um"]
+    ref_has_type = "traj_trajectory_type" in ref
+    ref_has_force = "traj_force_type" in ref
+    ref_has_traj_id = "traj_traj_id" in ref
 
     # Pre-smooth the residual across the whole concatenated array but
     # respecting trial boundaries (smoothing within a trial only).
@@ -539,19 +832,37 @@ def load_compensated_trajectories(augmented_npz_path,
 
         theta = float(aug["trial_theta_init"][i])
         start_pos = int(aug["trial_start_position_um"][i])
+        aug_has_type = "trial_trajectory_type" in aug
+        aug_has_force = "trial_force_type" in aug
+        aug_has_traj_id = "trial_traj_id" in aug
+        trial_traj_type = str(aug["trial_trajectory_type"][i]) if aug_has_type else "pendulum_drop"
+        trial_force_type = str(aug["trial_force_type"][i]) if aug_has_force else "ctrl"
+        trial_traj_id = int(aug["trial_traj_id"][i]) if aug_has_traj_id else i
 
         # Match to a reference trajectory.
         match_idx = None
         for j in range(n_ref):
-            if int(ref_starts[j]) != start_pos:
-                continue
-            if abs(float(ref_thetas[j]) - theta) > theta_tol_rad:
-                continue
-            match_idx = j
-            break
+            ref_force = str(ref["traj_force_type"][j]) if ref_has_force else "ctrl"
+            ref_type = str(ref["traj_trajectory_type"][j]) if ref_has_type else "pendulum_drop"
+
+            if trial_traj_type == "sinusoidal" and ref_type == "sinusoidal":
+                ref_tid = int(ref["traj_traj_id"][j]) if ref_has_traj_id else j
+                if ref_tid == trial_traj_id and ref_force == trial_force_type:
+                    match_idx = j
+                    break
+            else:
+                if int(ref_starts[j]) != start_pos:
+                    continue
+                if abs(float(ref_thetas[j]) - theta) > theta_tol_rad:
+                    continue
+                if ref_force != trial_force_type:
+                    continue
+                match_idx = j
+                break
         if match_idx is None:
             print(f"  Trial {i + 1}: no reference trajectory match for "
-                  f"(theta={np.degrees(theta):+.1f}°, start={start_pos} um); "
+                  f"({trial_traj_type}/{trial_force_type}, "
+                  f"theta={np.degrees(theta):+.1f}°, start={start_pos} um); "
                   f"skipping.")
             skipped += 1
             continue
@@ -583,6 +894,9 @@ def load_compensated_trajectories(augmented_npz_path,
             "sim_pend_thetadot": ref["sim_pend_thetadot"][rlo:rlo + n_use],
             "sim_timestep_s": sim_dt_s,
             "n_steps": n_use,
+            "trajectory_type": trial_traj_type,
+            "force_type": trial_force_type,
+            "traj_id": trial_traj_id,
         })
 
     print(f"Built {len(trajectories)} compensated trajectories "
@@ -677,17 +991,18 @@ def run_simulation_trial(motor, trajectory,
         force_cmd_list.append(F_cmd_clamped)
 
         # Store corresponding simulation cart state at this timestep
-        # sim_cart_x is in metres; convert to µm for direct comparison with motor
         sim_position_um_list.append(
             sim_cart_x_arr[i] * 1e6 + MOTOR_CENTER_UM
         )
-        # sim_cart_xdot is in m/s; convert to mm/s for comparison
         sim_velocity_mm_s_list.append(
             sim_cart_xdot_arr[i] * 1e3
         )
-        # sim_cart_xddot is in m/s²; convert to mm/s² for comparison
+        # Reference acceleration: the acceleration the shaft SHOULD achieve
+        # if the commanded force were applied with no friction.
+        # F_cmd (unclamped, mN) / mass_shaft (kg) = mm/s² (since kg·mm/s²=mN).
+        # This works for both ctrl (F=m*a_cart*1e3) and env (F=F_env*1e3) types.
         sim_accel_mmpss_list.append(
-            sim_cart_xddot_arr[i] * 1e3
+            F_cmd / PARAMS["mass_shaft_kg"]
         )
 
         if pos_um <= safe_min or pos_um >= safe_max:
@@ -761,6 +1076,9 @@ def collect_simulation_data(motor, trajectories,
     trial_n_samples = []
     trial_theta_init = []
     trial_start_position_um = []
+    trial_trajectory_type = []
+    trial_force_type = []
+    trial_traj_id = []
 
     motor.set_mode(MotorMode.SleepMode)
     motor.clear_errors()
@@ -776,10 +1094,15 @@ def collect_simulation_data(motor, trajectories,
             start_pos = traj["start_position_um"]
             n_steps = traj["n_steps"]
 
-            print(f"\n--- Simulation trial {trial_num}/{total_trials}: "
+            traj_type = traj.get("trajectory_type", "pendulum_drop")
+            force_type = traj.get("force_type", "ctrl")
+            traj_id = traj.get("traj_id", trial_num - 1)
+
+            print(f"\n--- Trial {trial_num}/{total_trials} "
+                  f"[{traj_type}/{force_type}]: "
                   f"theta_init={np.degrees(theta):+.1f}°, "
                   f"start_pos={start_pos} um, "
-                  f"{n_steps} force steps ---")
+                  f"{n_steps} steps ---")
 
             print("  Auto-zeroing...")
             error = auto_zero_motor(motor)
@@ -826,6 +1149,9 @@ def collect_simulation_data(motor, trajectories,
             trial_n_samples.append(n_samples)
             trial_theta_init.append(theta)
             trial_start_position_um.append(start_pos)
+            trial_trajectory_type.append(traj_type)
+            trial_force_type.append(force_type)
+            trial_traj_id.append(traj_id)
 
             time.sleep(0.5)
 
@@ -866,6 +1192,9 @@ def collect_simulation_data(motor, trajectories,
         trial_start_position_um=np.array(trial_start_position_um, dtype=np.int32),
         trial_n_samples=trial_n_samples_arr,
         trial_boundaries=trial_boundaries,
+        trial_trajectory_type=np.array(trial_trajectory_type, dtype="U20"),
+        trial_force_type=np.array(trial_force_type, dtype="U10"),
+        trial_traj_id=np.array(trial_traj_id, dtype=np.int32),
         # Concatenated per-sample arrays — motor measured
         t_stream=np.concatenate(all_t_stream),
         position_um=np.concatenate(all_position_um),
@@ -923,17 +1252,19 @@ def main():
     print(f"  mass_shaft:          {PARAMS['mass_shaft_kg']} kg")
     print(f"  output directory:    {DATA_DIR}/")
 
-    total_traj = len(THETA_INITS) * len(DEFAULT_START_POSITIONS_UM)
-    print(f"\nTotal trajectories: {total_traj}")
+    total_pend = len(THETA_INITS) * len(DEFAULT_START_POSITIONS_UM)
+    print(f"\nPendulum-drop trajectories: {total_pend}")
 
     print(f"\nOptions:")
-    print(f"  1) Generate trajectories only (no motor needed)")
-    print(f"  2) Generate trajectories and collect motor data")
-    print(f"  3) Load existing trajectories and collect motor data")
-    print(f"  4) Replay with friction compensation from a previous run")
-    choice = input("Select [1/2/3/4]: ").strip() or "2"
+    print(f"  1) Generate pendulum-drop trajectories only (no motor)")
+    print(f"  2) Generate pendulum-drop trajectories and collect motor data")
+    print(f"  3) Generate sinusoidal trajectories only (no motor)")
+    print(f"  4) Generate sinusoidal trajectories and collect motor data")
+    print(f"  5) Load existing trajectories and collect motor data")
+    print(f"  6) Replay with friction compensation from a previous run")
+    choice = input("Select [1-6]: ").strip() or "4"
 
-    # Defaults for the standard collection path; overridden by option 4.
+    # Defaults for the standard collection path; overridden by option 6.
     output_filename = "calibration_simulation_friction.npz"
     force_safety_limit_mn = FORCE_SAFETY_LIMIT_MN
 
@@ -948,14 +1279,32 @@ def main():
             print("\nDone (trajectories only, no motor data collected).")
             return
 
-    elif choice == "3":
+    elif choice in ("3", "4"):
+        n_input = input("\nNumber of sinusoidal trajectories [20]: ").strip()
+        n_sin = int(n_input) if n_input else 20
+        seed_input = input("Random seed [123]: ").strip()
+        seed = int(seed_input) if seed_input else 123
+
+        trajectories = generate_sinusoidal_trajectories(
+            n_trajectories=n_sin, seed=seed,
+        )
+
+        os.makedirs(DATA_DIR, exist_ok=True)
+        traj_path = os.path.join(DATA_DIR, "simulation_trajectories.npz")
+        save_trajectories(trajectories, traj_path)
+
+        if choice == "3":
+            print("\nDone (trajectories only, no motor data collected).")
+            return
+
+    elif choice == "5":
         traj_path = input("Path to trajectories .npz file: ").strip()
         if not os.path.isfile(traj_path):
             print(f"File not found: {traj_path}")
             return
         trajectories = load_trajectories(traj_path)
 
-    elif choice == "4":
+    elif choice == "6":
         aug_path = input(
             "Path to augmented friction-estimate npz "
             "(e.g. calibration_simulation_friction_with_estimate.npz "

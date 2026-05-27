@@ -101,6 +101,10 @@ def load_shaft_data(filepath):
     n_trials = int(d["n_trials"])
     boundaries = d["trial_boundaries"]
 
+    has_type = "trial_trajectory_type" in d
+    has_force = "trial_force_type" in d
+    has_traj_id = "trial_traj_id" in d
+
     trials = []
     for i in range(n_trials):
         lo, hi = int(boundaries[i]), int(boundaries[i + 1])
@@ -122,6 +126,9 @@ def load_shaft_data(filepath):
             "force_commanded_mN": d["force_commanded_mN"][lo:hi].astype(np.float64),
             "t_vel_s": d["t_vel"][lo:hi].astype(np.float64) - t0,
             "vel_mm_s": d["vel_mm_s"][lo:hi].astype(np.float64),
+            "trajectory_type": str(d["trial_trajectory_type"][i]) if has_type else "pendulum_drop",
+            "force_type": str(d["trial_force_type"][i]) if has_force else "ctrl",
+            "traj_id": int(d["trial_traj_id"][i]) if has_traj_id else i,
         })
 
     metadata = {
@@ -139,10 +146,14 @@ def load_reference_trajectories(filepath):
     Returns (list of per-trajectory dicts, metadata dict). Time axis for
     each trajectory is k * sim_timestep_s starting at 0.
     """
-    d = np.load(filepath)
+    d = np.load(filepath, allow_pickle=True)
     n_traj = int(d["n_trajectories"])
     boundaries = d["traj_boundaries"]
     sim_dt_s = float(d["sim_timestep_s"])
+
+    has_type = "traj_trajectory_type" in d
+    has_force = "traj_force_type" in d
+    has_traj_id = "traj_traj_id" in d
 
     trajs = []
     for i in range(n_traj):
@@ -161,6 +172,9 @@ def load_reference_trajectories(filepath):
             "sim_cart_xddot_mps2": d["sim_cart_xddot"][lo:hi].astype(np.float64),
             "sim_pend_theta_rad": d["sim_pend_theta"][lo:hi].astype(np.float64),
             "sim_pend_thetadot_radps": d["sim_pend_thetadot"][lo:hi].astype(np.float64),
+            "trajectory_type": str(d["traj_trajectory_type"][i]) if has_type else "pendulum_drop",
+            "force_type": str(d["traj_force_type"][i]) if has_force else "ctrl",
+            "traj_id": int(d["traj_traj_id"][i]) if has_traj_id else i,
         })
 
     metadata = {
@@ -180,24 +194,39 @@ def load_reference_trajectories(filepath):
 
 def match_trials_to_references(shaft_trials, reference_trajs, theta_tol_rad):
     """Pair each shaft trial with the reference trajectory of matching
-    (theta_init, start_position_um). A reference trajectory may match
-    multiple shaft trials (if iterations_per_combo > 1).
+    identity. For sinusoidal trajectories, matches by (traj_id, force_type).
+    For pendulum_drop, matches by (theta_init, start_position_um).
 
     Returns list of (shaft_trial, ref_traj) tuples.
     """
     pairs = []
     for st in shaft_trials:
         match = None
+        st_type = st.get("trajectory_type", "pendulum_drop")
+        st_force = st.get("force_type", "ctrl")
+
         for rt in reference_trajs:
-            if rt["start_position_um"] != st["start_position_um"]:
-                continue
-            if abs(rt["theta_init"] - st["theta_init"]) > theta_tol_rad:
-                continue
-            match = rt
-            break
+            rt_type = rt.get("trajectory_type", "pendulum_drop")
+            rt_force = rt.get("force_type", "ctrl")
+
+            if st_type == "sinusoidal" and rt_type == "sinusoidal":
+                if rt.get("traj_id") == st.get("traj_id") and rt_force == st_force:
+                    match = rt
+                    break
+            else:
+                if rt["start_position_um"] != st["start_position_um"]:
+                    continue
+                if abs(rt["theta_init"] - st["theta_init"]) > theta_tol_rad:
+                    continue
+                if rt_force != st_force:
+                    continue
+                match = rt
+                break
+
         if match is None:
             print(f"  WARNING: shaft trial {st['trial_num']} "
-                  f"(theta={np.degrees(st['theta_init']):+.1f}°, "
+                  f"({st_type}/{st_force}, "
+                  f"theta={np.degrees(st['theta_init']):+.1f}°, "
                   f"start={st['start_position_um']} µm) "
                   f"has no matching reference trajectory; skipping.")
             continue
@@ -319,8 +348,10 @@ def plot_trial_comparison(shaft_trial, ref_traj, motor_center_um):
     ax.set_ylabel("Acceleration (mm/s²)")
     ax.legend(fontsize=8, loc="best")
     ax.grid(True, alpha=0.3)
+    traj_type = shaft_trial.get("trajectory_type", "pendulum_drop")
+    force_type = shaft_trial.get("force_type", "ctrl")
     ax.set_title(
-        f"Trial {shaft_trial['trial_num']} | "
+        f"Trial {shaft_trial['trial_num']} [{traj_type}/{force_type}] | "
         f"theta_init = {np.degrees(shaft_trial['theta_init']):+.1f}° | "
         f"start = {shaft_trial['start_position_um']} µm | "
         f"accel RMSE = {rmse:.0f} mm/s²"
@@ -374,7 +405,8 @@ def plot_summary(pairs, accel_rmse_list):
     """Bar chart of acceleration RMSE per trial."""
     fig, ax = plt.subplots(figsize=(max(8, 0.4 * len(pairs)), 5))
     labels = [
-        f"#{st['trial_num']}\n{np.degrees(st['theta_init']):+.0f}°\n"
+        f"#{st['trial_num']}\n{st.get('force_type', 'ctrl')}\n"
+        f"{np.degrees(st['theta_init']):+.0f}°\n"
         f"{st['start_position_um'] // 1000}k"
         for st, _ in pairs
     ]
@@ -454,7 +486,8 @@ def main():
         fig, rmse = plot_trial_comparison(st, rt, motor_center_um)
         accel_rmse_list.append(rmse)
         if not args.no_individual_plots:
-            fname = (f"trial_{st['trial_num']:03d}_"
+            force_type = st.get("force_type", "ctrl")
+            fname = (f"trial_{st['trial_num']:03d}_{force_type}_"
                      f"theta_{int(np.degrees(st['theta_init'])):+04d}_"
                      f"start_{st['start_position_um']}.png")
             fpath = os.path.join(out_dir, fname)

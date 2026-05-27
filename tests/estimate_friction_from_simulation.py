@@ -214,6 +214,10 @@ def load_shaft_npz(filepath):
     n_trials = int(data_dict["n_trials"])
     boundaries = data_dict["trial_boundaries"]
 
+    has_type = "trial_trajectory_type" in data_dict
+    has_force = "trial_force_type" in data_dict
+    has_traj_id = "trial_traj_id" in data_dict
+
     trial_info = []
     for i in range(n_trials):
         lo, hi = int(boundaries[i]), int(boundaries[i + 1])
@@ -224,6 +228,9 @@ def load_shaft_npz(filepath):
             "theta_init": float(data_dict["trial_theta_init"][i]),
             "start_position_um": int(data_dict["trial_start_position_um"][i]),
             "n_samples": int(data_dict["trial_n_samples"][i]),
+            "trajectory_type": str(data_dict["trial_trajectory_type"][i]) if has_type else "pendulum_drop",
+            "force_type": str(data_dict["trial_force_type"][i]) if has_force else "ctrl",
+            "traj_id": int(data_dict["trial_traj_id"][i]) if has_traj_id else i,
         })
     return data_dict, trial_info
 
@@ -408,8 +415,11 @@ def plot_trial(data, trial, mass_shaft_kg, friction_estimate, iteration=0):
     ax.set_ylabel("Force (mN)")
     ax.legend(fontsize=8, loc="best")
     ax.grid(True, alpha=0.3)
+    traj_type = trial.get("trajectory_type", "pendulum_drop")
+    force_type = trial.get("force_type", "ctrl")
     ax.set_title(
-        f"Trial {trial['trial_num']} | iter {iteration} | "
+        f"Trial {trial['trial_num']} [{traj_type}/{force_type}] | "
+        f"iter {iteration} | "
         f"theta_init = {np.degrees(trial['theta_init']):+.1f}° | "
         f"start = {trial['start_position_um']} µm"
     )
@@ -497,11 +507,14 @@ def main():
     print(f"  {len(trial_info)} trials")
 
     # --- Compute the friction estimate (residual tracking error) ---
+    # sim_accel_mmpss is the reference: the acceleration the shaft should
+    # achieve if the commanded force were applied with no friction.
+    # For ctrl trials this equals cart x_ddot*1e3; for env trials it equals
+    # sim_env_N*1e3 / mass_shaft_kg.
     friction_estimate = compute_force_friction_estimate(
-        data["force_commanded_mN"],
+        data["sim_accel_mmpss"],
         data["accel_mmpss"],
         mass_shaft_kg,
-        data["trial_boundaries"],
     )
     n_finite = int(np.sum(np.isfinite(friction_estimate)))
     n_total = len(friction_estimate)
@@ -548,7 +561,8 @@ def main():
         if fig is None:
             print(f"  Skipping trial {trial['trial_num']}: too few samples.")
             continue
-        fname = (f"trial_{trial['trial_num']:03d}_"
+        force_type = trial.get("force_type", "ctrl")
+        fname = (f"trial_{trial['trial_num']:03d}_{force_type}_"
                  f"theta_{int(np.degrees(trial['theta_init'])):+04d}_"
                  f"start_{trial['start_position_um']}.png")
         fig.savefig(os.path.join(out_dir, fname), dpi=130)
