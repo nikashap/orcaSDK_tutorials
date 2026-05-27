@@ -126,9 +126,32 @@ double compute_fx(double t) {
     default: return 0.0;  // mode 0 and anything unrecognised
   }
 }
+// =====================================================================
+// Cart-pole continuous dynamics: state s = (x, theta, xdot, thetadot)
+// =====================================================================
+static inline void dynamics(const double s[4], double fx, double ds[4]) {
+  double theta    = s[1];
+  double xdot     = s[2];
+  double thetadot = s[3];
+
+  double sn = sin(theta);
+  double cs = cos(theta);
+  double D  = sim_m_c + sim_m_p * sn * sn;
+
+  double xdd = (fx + sim_m_p * sn
+                * (sim_l * thetadot * thetadot + sim_g * cs)) / D;
+  double tdd = (-fx * cs
+                - sim_m_p * sim_l * thetadot * thetadot * cs * sn
+                - (sim_m_c + sim_m_p) * sim_g * sn) / (sim_l * D);
+
+  ds[0] = xdot;
+  ds[1] = thetadot;
+  ds[2] = xdd;
+  ds[3] = tdd;
+}
 
 // =====================================================================
-// Simulation core — semi-implicit Euler (MuJoCo "Euler", no damping)
+// Simulation core — classical RK4
 // =====================================================================
 void run_simulation() {
   uint32_t wall_start = micros();
@@ -143,30 +166,31 @@ void run_simulation() {
   elapsedMicros since_yield;
 
   for (uint64_t k = 0; k < sim_total_steps; k++) {
-    // Time at the START of this step — used for force evaluation.
-    double t_k = (double)k * sim_dt;
-    double fx  = compute_fx(t_k);
+    double t_k    = (double)k * sim_dt;
+    double t_mid  = t_k + 0.5 * sim_dt;
+    double t_end  = t_k + sim_dt;
 
-    // sin/cos computed once and reused.
-    double s = sin(sim_theta);
-    double c = cos(sim_theta);
-    double D = sim_m_c + sim_m_p * s * s;
+    double fx_k   = compute_fx(t_k);
+    double fx_mid = compute_fx(t_mid);
+    double fx_end = compute_fx(t_end);
 
-    // Accelerations (Underactuated Robotics §3.2)
-    double xdd = (fx + sim_m_p * s
-                  * (sim_l * sim_thetadot * sim_thetadot + sim_g * c)) / D;
-    double tdd = (-fx * c
-                  - sim_m_p * sim_l * sim_thetadot * sim_thetadot * c * s
-                  - (sim_m_c + sim_m_p) * sim_g * s) / (sim_l * D);
+    double y[4]  = { sim_x, sim_theta, sim_xdot, sim_thetadot };
+    double k1[4], k2[4], k3[4], k4[4], ytmp[4];
 
-    // Semi-implicit Euler: update velocities FIRST, then positions
-    // using the NEW velocities.
-    sim_xdot     += sim_dt * xdd;
-    sim_thetadot += sim_dt * tdd;
-    sim_x        += sim_dt * sim_xdot;
-    sim_theta    += sim_dt * sim_thetadot;
+    dynamics(y, fx_k, k1);
+    for (int i = 0; i < 4; i++) ytmp[i] = y[i] + 0.5 * sim_dt * k1[i];
+    dynamics(ytmp, fx_mid, k2);
+    for (int i = 0; i < 4; i++) ytmp[i] = y[i] + 0.5 * sim_dt * k2[i];
+    dynamics(ytmp, fx_mid, k3);
+    for (int i = 0; i < 4; i++) ytmp[i] = y[i] + sim_dt * k3[i];
+    dynamics(ytmp, fx_end, k4);
 
-    // NaN / Inf guard
+    double sixth = sim_dt / 6.0;
+    sim_x        += sixth * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]);
+    sim_theta    += sixth * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1]);
+    sim_xdot     += sixth * (k1[2] + 2.0 * k2[2] + 2.0 * k3[2] + k4[2]);
+    sim_thetadot += sixth * (k1[3] + 2.0 * k2[3] + 2.0 * k3[3] + k4[3]);
+
     if (!isfinite(sim_x) || !isfinite(sim_theta) ||
         !isfinite(sim_xdot) || !isfinite(sim_thetadot)) {
       flush_packet();
@@ -174,14 +198,12 @@ void run_simulation() {
       return;
     }
 
-    // Emit sample (time is AFTER the step)
     if (k % sim_sample_stride == 0) {
       double t_out = (double)(k + 1) * sim_dt;
       append_sample(k, t_out, sim_x, sim_theta,
-                    sim_xdot, sim_thetadot, fx);
+                    sim_xdot, sim_thetadot, fx_k);
     }
 
-    // Yield to UDP every ~1 ms of wall time so ABORT can interrupt.
     if (since_yield >= 1000) {
       since_yield = 0;
       int sz = Udp.parsePacket();
