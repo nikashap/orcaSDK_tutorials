@@ -2,9 +2,12 @@
 
 ## Purpose
 
-Validate that a semi-implicit Euler integrator running on a Teensy 4.1 correctly integrates the full cart-pole equations of motion. This is a **standalone numerical-correctness test** — no motor, no force sensor, no real-time constraint. The Teensy runs the dynamics as fast as it can, streams the trajectory back to a Mac over UDP, and the Mac compares against a high-accuracy reference computed with `scipy.integrate.solve_ivp`.
+Validate that an RK4 integrator running on a Teensy 4.1 correctly integrates the full cart-pole equations of motion. This is a **standalone numerical-correctness test** — no motor, no force sensor, no real-time constraint. The Teensy runs the dynamics as fast as it can, streams the trajectory back to a Mac over UDP, and the Mac compares against a high-accuracy reference computed with `scipy.integrate.solve_ivp`.
 
-The output is a confidence statement: "the Teensy reproduces the reference trajectory within errors consistent with semi-implicit Euler at the chosen timestep."
+The output is a confidence statement: "the Teensy reproduces the reference trajectory within errors consistent with RK4 at the chosen timestep."
+
+## Completion date
+The deliverables were completed on 05/27/26
 
 ## Deliverables
 
@@ -34,19 +37,9 @@ $$
 
 The denominator $m_c + m_p\sin^2\theta$ is bounded below by $m_c > 0$; no singularity guarding is required.
 
-### Integrator: semi-implicit Euler (MuJoCo's `Euler` with no joint damping)
+### Integrator: RK4
 
-Per the MuJoCo numerical-integration docs, semi-implicit Euler is:
-
-$$
-v_{t+h} = v_t + h\, a_t, \qquad q_{t+h} = q_t + h\, v_{t+h}
-$$
-
-With no joint damping in this model, MuJoCo's `Euler` integrator reduces exactly to the formula above. Concretely, per step of size $h = \Delta t$:
-
-1. Evaluate $(\ddot x_k, \ddot\theta_k)$ from current state $(x_k, \theta_k, \dot x_k, \dot\theta_k)$ and current $f_x(t_k)$.
-2. $\dot x_{k+1} = \dot x_k + h\,\ddot x_k$ and $\dot\theta_{k+1} = \dot\theta_k + h\,\ddot\theta_k$.
-3. $x_{k+1} = x_k + h\,\dot x_{k+1}$ and $\theta_{k+1} = \theta_k + h\,\dot\theta_{k+1}$ (note: **new** velocities).
+Use a standard implementation of RK4 in the given timestep
 
 Use `double` precision throughout (the Teensy 4.1 Cortex-M7 has a hardware double-precision FPU).
 
@@ -70,7 +63,7 @@ The Python and Teensy implementations must produce identical $f_x(t)$ values for
 +-----------------+   UDP (Ethernet)   +-------------------+
 |  Mac (Python)   | <----------------> |  Teensy 4.1       |
 |  validate_*.py  |                    |  cartpole_sim.ino |
-|  scipy ref sim  |                    |  semi-impl. Euler |
+|  scipy ref sim  |                    |  RK4 |
 +-----------------+                    +-------------------+
 ```
 
@@ -110,7 +103,7 @@ Format `t`, `x`, `theta`, `xdot`, `thetadot`, `fx` with `printf("%.10g")` so the
 
 - Use QNEthernet, same setup pattern as `teensy_orca_bridge.ino`.
 - State variables: `double m_c, m_p, l, g; double x, theta, xdot, thetadot; double dt; uint64_t total_steps; int sample_stride;` plus the force-mode params.
-- Implement a single function `void step()` that performs one semi-implicit Euler update using the equations above. Inline the math; do not over-abstract.
+- Implement a single function `void step()` that performs one RK4 update using the equations above.
 - Run the simulation in a tight loop after receiving `SIM_RUN`. The simulation is **not** real-time. Wall time should be << simulated time; expected throughput is hundreds of thousands of steps per second.
 - After each step, if `step_index % sample_stride == 0`, append the sample to an in-RAM buffer. When the buffer holds ~8 samples or the simulation ends, send via UDP and reset the buffer.
 - Yield to UDP RX (`Udp.parsePacket()`) at least every ~1 ms of wall time so an `ABORT` command can interrupt.
@@ -223,6 +216,5 @@ A failure that is small in magnitude but the **wrong scaling** in the `convergen
 - Friction lookup table.
 - Haptic-rendering force feedback.
 - Real-time scheduling, `IntervalTimer`-paced loops.
-- Any RK4 variant (semi-implicit Euler only).
 
 These belong to later phases of the project and would confound the numerical validation if mixed in here.
