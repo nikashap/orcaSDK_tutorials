@@ -504,14 +504,14 @@ def main():
     p.add_argument("--ping-only", action="store_true")
     p.add_argument("--autozero", action="store_true")
     p.add_argument("--duration", type=float, default=10.0)
-    p.add_argument("--m-c", type=float, default=1.0)
-    p.add_argument("--m-p", type=float, default=0.1)
-    p.add_argument("--m-s", type=float, default=0.5)
-    p.add_argument("--l", type=float, default=0.5)
+    p.add_argument("--m-c", type=float, default=2.0)
+    p.add_argument("--m-p", type=float, default=2.0)
+    p.add_argument("--m-s", type=float, default=4.0)
+    p.add_argument("--l", type=float, default=0.3)
     p.add_argument("--theta0", type=float, default=0.1,
                    help="Initial pendulum angle in radians (default 0.1)")
-    p.add_argument("--max-force", type=float, default=5000.0,
-                   help="Force clip in mN (default 5000)")
+    p.add_argument("--max-force", type=float, default=50000.0,
+                   help="Force clip in mN (default 50000)")
     p.add_argument("--output", type=str, default=None,
                    help="Output HDF5 path (default: auto-timestamped)")
     args = p.parse_args()
