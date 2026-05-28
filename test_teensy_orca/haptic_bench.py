@@ -61,7 +61,7 @@ ERR_NAMES = {
 # fx(f) fpc(f) f_command_mN(f) force_sensed_mN(f) loop_us(u32)
 SAMPLE_FMT  = "<II9fI"
 SAMPLE_SIZE = struct.calcsize(SAMPLE_FMT)
-assert SAMPLE_SIZE == 52, f"Expected 52, got {SAMPLE_SIZE}"
+assert SAMPLE_SIZE == 48, f"Expected 48, got {SAMPLE_SIZE}"
 
 SAMPLE_FIELDS = [
     "cycle", "t_meas_us",

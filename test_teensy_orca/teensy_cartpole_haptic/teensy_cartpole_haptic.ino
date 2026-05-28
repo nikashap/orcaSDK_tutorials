@@ -127,7 +127,7 @@ bool   state_initialized = false;
 // Telemetry sample (packed binary, little-endian)
 //
 // Python struct format: '<II9fI'
-// Total: 4+4 + 10*4 + 4 = 52 bytes
+// Total: 4+4 + 9*4 + 4 = 48 bytes
 // =====================================================================
 struct __attribute__((packed)) Sample {
   uint32_t cycle;
@@ -140,7 +140,7 @@ struct __attribute__((packed)) Sample {
   float    force_sensed_mN;  // motor_tele.force_mn (lags ~3 frames)
   uint32_t loop_us;
 };
-static_assert(sizeof(Sample) == 52, "Sample struct packing");
+static_assert(sizeof(Sample) == 48, "Sample struct packing");
 
 constexpr int MAX_SAMPLES_PER_PACKET = 8;
 Sample   tele_buf[MAX_SAMPLES_PER_PACKET];
@@ -159,6 +159,20 @@ struct MotorTelemetry {
   bool     valid;
 };
 MotorTelemetry motor_tele = {};
+
+// =====================================================================
+// Result of one extended-mode motor exchange (defined here, before the
+// first function, so the Arduino auto-generated prototype for
+// motor_exchange() can see the type).
+// =====================================================================
+struct MotorExchange {
+  int32_t  position_um;
+  int32_t  speed_mmps;
+  int32_t  accel_mmpss;
+  uint16_t errors;
+  uint32_t t_meas_us;
+  bool     ok;
+};
 
 // =====================================================================
 // State machine
@@ -664,15 +678,6 @@ bool sign_check() {
 //
 // Returns true if all three transactions succeeded.
 // =====================================================================
-struct MotorExchange {
-  int32_t  position_um;
-  int32_t  speed_mmps;
-  int32_t  accel_mmpss;
-  uint16_t errors;
-  uint32_t t_meas_us;
-  bool     ok;
-};
-
 MotorExchange motor_exchange(int32_t force_mN) {
   MotorExchange ex = {};
   uint8_t tx[16], rx[32];
