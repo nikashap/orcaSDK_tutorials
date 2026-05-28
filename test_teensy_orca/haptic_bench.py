@@ -133,8 +133,13 @@ class HapticBench:
 
         # Clock sync: offset in microseconds such that
         #   mac_perf_counter_us = teensy_micros + clock_offset_us
-        # None until clock_sync() is called.
-        self.clock_offset_us: float | None = None
+        # None until clock_sync() is called.  The anchor (mac_us, teensy_us)
+        # of the best sync round is also kept so two syncs (start + end of run)
+        # can be combined into a skew-corrected mapping that removes crystal
+        # drift over the run.
+        self.clock_offset_us:        float | None = None
+        self.clock_anchor_mac_us:    float | None = None
+        self.clock_anchor_teensy_us: float | None = None
 
         self._stop = threading.Event()
         self._rx_thread = threading.Thread(target=self._receiver, daemon=True)
@@ -233,6 +238,8 @@ class HapticBench:
         """
         best_rtt = float("inf")
         best_offset = 0.0
+        best_mac_us = None
+        best_teensy_us = None
 
         for _ in range(rounds):
             t1 = time.perf_counter()
@@ -254,10 +261,14 @@ class HapticBench:
             if rtt_us < best_rtt:
                 best_rtt = rtt_us
                 best_offset = offset
+                best_mac_us = mac_mid_us
+                best_teensy_us = teensy_us
 
             time.sleep(0.01)
 
         self.clock_offset_us = best_offset
+        self.clock_anchor_mac_us = best_mac_us
+        self.clock_anchor_teensy_us = best_teensy_us
         print(f"[CLOCK] synced: offset={best_offset:.0f} us, "
               f"best RTT={best_rtt:.0f} us")
         return best_offset
@@ -364,7 +375,9 @@ class HapticBench:
 # =====================================================================
 # Summary stats
 # =====================================================================
-def print_summary(samples: list[Sample], clock_offset_us: float | None = None):
+def print_summary(samples: list[Sample],
+                  anchor0: tuple[float | None, float | None] | None = None,
+                  anchor1: tuple[float | None, float | None] | None = None):
     if not samples:
         print("No samples.")
         return
@@ -376,30 +389,49 @@ def print_summary(samples: list[Sample], clock_offset_us: float | None = None):
     print(f"\nCycle span: {cycles[0]}..{cycles[-1]} "
           f"({expected} expected, {received} received, {dropped} dropped)")
 
-    loop_us = np.array([s.loop_us for s in samples])
+    # loop_us reports the previous iteration's work time; the first sample
+    # carries a sentinel 0, so drop it before computing timing stats.
+    loop_us = np.array([s.loop_us for s in samples])[1:]
     print(f"\nLoop timing (us):")
-    print(f"  mean={loop_us.mean():.1f}  median={np.median(loop_us):.1f}  "
-          f"std={loop_us.std():.1f}")
-    print(f"  min={loop_us.min()}  max={loop_us.max()}")
-    if len(loop_us) >= 20:
-        print(f"  p95={np.percentile(loop_us, 95):.1f}  "
-              f"p99={np.percentile(loop_us, 99):.1f}")
+    if len(loop_us) == 0:
+        print("  (not enough samples)")
+    else:
+        print(f"  mean={loop_us.mean():.1f}  median={np.median(loop_us):.1f}  "
+              f"std={loop_us.std():.1f}")
+        print(f"  min={loop_us.min()}  max={loop_us.max()}")
+        if len(loop_us) >= 20:
+            print(f"  p95={np.percentile(loop_us, 95):.1f}  "
+                  f"p99={np.percentile(loop_us, 99):.1f}")
 
-    overruns = np.sum(loop_us > 1800)
-    print(f"  overruns (>1800us): {overruns} ({100*overruns/len(loop_us):.2f}%)")
+        overruns = np.sum(loop_us > 1800)
+        print(f"  overruns (>1800us): {overruns} ({100*overruns/len(loop_us):.2f}%)")
 
     duration_s = (samples[-1].arrival_time - samples[0].arrival_time)
     if duration_s > 0:
         rate = received / duration_s
         print(f"\n  Achieved rate: {rate:.1f} Hz")
 
-    # Teensy→Mac latency (requires clock sync)
-    if clock_offset_us is not None:
+    # Teensy→Mac latency (requires clock sync). With start+end anchors, map
+    # teensy time → Mac time with a skew (rate) correction that removes crystal
+    # drift over the run; otherwise fall back to the single-anchor constant.
+    have_anchor0 = anchor0 is not None and anchor0[0] is not None
+    if have_anchor0:
+        T0, M0 = anchor0
+        if (anchor1 is not None and anchor1[0] is not None
+                and anchor1[1] != M0):
+            T1, M1 = anchor1
+            skew = (T1 - T0) / (M1 - M0)
+            mode = "skew-corrected"
+        else:
+            skew = 1.0
+            mode = "single-anchor"
         latency_us = np.array([
-            s.arrival_time * 1e6 - (s.t_meas_us + clock_offset_us)
+            s.arrival_time * 1e6 - (T0 + (s.t_meas_us - M0) * skew)
             for s in samples
         ])
-        print(f"\nTeensy→Mac latency (us) [meas → Mac receipt, includes batching]:")
+        print(f"\nTeensy→Mac latency (us) [{mode}, meas → Mac receipt, incl. batching]:")
+        if mode == "skew-corrected":
+            print(f"  clock skew: {(skew - 1.0) * 1e6:+.1f} ppm")
         print(f"  mean={latency_us.mean():.0f}  median={np.median(latency_us):.0f}  "
               f"std={latency_us.std():.0f}")
         print(f"  min={latency_us.min():.0f}  max={latency_us.max():.0f}")
@@ -441,6 +473,7 @@ def run(duration_s: float = 10.0,
             return
         print("[OK] PING")
         bench.clock_sync()
+        anchor0 = (bench.clock_anchor_mac_us, bench.clock_anchor_teensy_us)
 
         # -- Config
         if not bench.config(m_c=m_c, m_p=m_p, m_s=m_s, l=l,
@@ -472,9 +505,14 @@ def run(duration_s: float = 10.0,
         # Small delay to receive final packets
         time.sleep(0.1)
 
+        # Second clock sync brackets the run so the analysis can correct for
+        # Teensy↔Mac crystal drift (the offset is not constant over 60 s).
+        bench.clock_sync()
+        anchor1 = (bench.clock_anchor_mac_us, bench.clock_anchor_teensy_us)
+
         samples = bench.get_samples()
         print(f"\nCollected {len(samples)} samples.")
-        print_summary(samples, bench.clock_offset_us)
+        print_summary(samples, anchor0, anchor1)
 
         # -- Save
         if output is None:
@@ -484,8 +522,15 @@ def run(duration_s: float = 10.0,
             "g": 9.81, "max_force_mN": max_force_mN,
             "theta0": theta0, "duration_s": duration_s,
         }
-        if bench.clock_offset_us is not None:
-            save_attrs["clock_offset_us"] = bench.clock_offset_us
+        # Clock-sync anchors for skew-corrected latency in the analysis.
+        # clock_offset_us is kept (= start-of-run offset) for older notebooks.
+        if anchor0[0] is not None:
+            save_attrs["clock_offset_us"]   = anchor0[0] - anchor0[1]
+            save_attrs["clock_mac_us_0"]    = anchor0[0]
+            save_attrs["clock_teensy_us_0"] = anchor0[1]
+        if anchor1[0] is not None:
+            save_attrs["clock_mac_us_1"]    = anchor1[0]
+            save_attrs["clock_teensy_us_1"] = anchor1[1]
         bench.save_h5(output, samples, attrs=save_attrs)
 
     finally:
