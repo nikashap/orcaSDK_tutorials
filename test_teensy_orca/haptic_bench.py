@@ -279,7 +279,7 @@ class HapticBench:
     def config(self, m_c: float, m_p: float, m_s: float,
                l: float, g: float = 9.81,
                max_force_mN: float = 5000.0,
-               loop_period_us: float = 1800.0,
+               loop_period_us: float = 1400.0,
                timeout: float = 3.0) -> bool:
         payload = struct.pack("<7f", m_c, m_p, m_s, l, g,
                               max_force_mN, loop_period_us)
@@ -460,6 +460,7 @@ def run(duration_s: float = 10.0,
         m_p: float = 0.1,
         m_s: float = 0.5,
         l: float = 0.5,
+        loop_period_us: float = 1400.0,
         theta0: float = 0.1,
         max_force_mN: float = 5000.0,
         output: str | None = None):
@@ -521,6 +522,7 @@ def run(duration_s: float = 10.0,
             "m_c": m_c, "m_p": m_p, "m_s": m_s, "l": l,
             "g": 9.81, "max_force_mN": max_force_mN,
             "theta0": theta0, "duration_s": duration_s,
+            "loop_period_us": loop_period_us, 
         }
         # Clock-sync anchors for skew-corrected latency in the analysis.
         # clock_offset_us is kept (= start-of-run offset) for older notebooks.
@@ -549,6 +551,7 @@ def main():
     p.add_argument("--ping-only", action="store_true")
     p.add_argument("--autozero", action="store_true")
     p.add_argument("--duration", type=float, default=10.0)
+    p.add_argument("--loop-period-us", type=float, default=1400.0)
     p.add_argument("--m-c", type=float, default=2.0)
     p.add_argument("--m-p", type=float, default=2.0)
     p.add_argument("--m-s", type=float, default=4.0)
@@ -585,6 +588,7 @@ def main():
 
     run(duration_s=args.duration,
         m_c=args.m_c, m_p=args.m_p, m_s=args.m_s, l=args.l,
+        loop_period_us=args.loop_period_us,
         theta0=args.theta0,
         max_force_mN=args.max_force,
         output=args.output)
