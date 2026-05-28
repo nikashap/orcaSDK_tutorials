@@ -730,6 +730,11 @@ void haptic_loop() {
   elapsedMicros loop_timer;
   bool running = true;
 
+  // loop_us reports the *previous* iteration's elapsed work time (steps 1–11,
+  // including the UDP-command poll) since that duration isn't known until after
+  // the current sample has already been pushed. First sample reports 0.
+  uint32_t prev_loop_us = 0;
+
   while (running) {
     loop_timer = 0;
 
@@ -778,8 +783,6 @@ void haptic_loop() {
     }
 
     // --- 9–10. Record telemetry ---
-    uint32_t elapsed = (uint32_t)loop_timer;
-
     Sample s;
     s.cycle        = loop_cycle;
     s.t_meas_us    = ex.t_meas_us;
@@ -792,7 +795,7 @@ void haptic_loop() {
     s.fpc          = (float)fpc;
     s.f_command_mN    = (float)f_cmd_mN;
     s.force_sensed_mN = (float)motor_tele.force_mn;
-    s.loop_us         = elapsed;
+    s.loop_us         = prev_loop_us;  // previous iteration's duration (incl. step 11)
     push_sample(s);
     last_sample = s;
 
@@ -811,6 +814,11 @@ void haptic_loop() {
         }
       }
     }
+
+    // Elapsed work time for this iteration (steps 1–11), reported by the
+    // next iteration's sample. Captured before the pacing spin so it reflects
+    // real work, not the fixed loop period.
+    prev_loop_us = (uint32_t)loop_timer;
 
     // --- 12. Pace the loop ---
     while ((uint32_t)loop_timer < par_loop_us) {

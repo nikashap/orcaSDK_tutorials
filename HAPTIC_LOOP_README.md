@@ -126,7 +126,9 @@ struct __attribute__((packed)) Sample {
   float    fx;             // inferred human force (log only)
   float    fpc;            // pendulum reaction force
   float    f_command_mN;   // commanded force after scaling + clip
-  uint32_t loop_us;        // measured duration of this loop iteration
+  float    force_sensed_mN;// motor's reported force (0x64 response, lags ~3 frames)
+  uint32_t loop_us;        // work time (steps 1-11, incl. UDP poll) of the
+                           //   PREVIOUS iteration; first sample reports 0
 };
 ```
 
