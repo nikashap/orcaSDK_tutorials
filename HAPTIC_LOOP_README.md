@@ -65,7 +65,7 @@ Do not integrate $x, \dot x$ — overwrite them from the motor each cycle.
 Before entering the loop, run a one-time numeric check in code and refuse to start if it fails. With the pendulum hanging ($\theta = 0$, $\dot\theta = 0$) and a small positive cart acceleration ($\ddot x = +1.0\ \text{m/s}^2$):
 
 - $\ddot\theta = -(\ddot x\cdot 1 + 0)/l = -\ddot x/l < 0$.
-- $P = m_p l(\ddot\theta\cdot 1 - 0) = m_p l\ddot\theta < 0$, so $f_{pc} = -P > 0$... 
+- $P = m_p l(\ddot\theta\cdot 1 - 0) = m_p l\ddot\theta < 0$, so $f_{pc} = -P > 0$
 
 **Stop and think about the physical expectation:** when the human shoves the cart in $+x$, the hanging pendulum lags behind and should pull the cart back toward $-x$. So the *rendered force the human feels* must oppose the shove, i.e. be negative for a positive shove.
 
@@ -89,7 +89,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 |---|---|---|---|---|
 | `0x01` | `CMD_PING` | none | 0 | Liveness check. Teensy replies `ACK 0x01`. |
 | `0x02` | `CMD_AUTOZERO` | none | 0 | Run motor autozero (see below). |
-| `0x03` | `CMD_CONFIG` | 7 × `float` | 28 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us`. (`loop_period_us` is a float for wire uniformity; round to integer µs on receipt.) Initial state is sent separately via `CMD_INIT`. |
+| `0x03` | `CMD_CONFIG` | 7 × `float` | 28 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us, x_init, theta_init, xdot_init, thetadot_init`. (`loop_period_us` is a float for wire uniformity; round to integer µs on receipt.) |
 | `0x04` | `CMD_INIT` | 4 × `float` | 16 | Initial pendulum state, in order: `x0, theta0, xdot0, thetadot0`. |
 | `0x05` | `CMD_BEGIN` | none | 0 | Enter the haptic loop (see below). |
 | `0x06` | `CMD_END` | none | 0 | Exit the loop, sleep the motor (see below). |
@@ -126,9 +126,7 @@ struct __attribute__((packed)) Sample {
   float    fx;             // inferred human force (log only)
   float    fpc;            // pendulum reaction force
   float    f_command_mN;   // commanded force after scaling + clip
-  float    force_sensed_mN;// motor's reported force (0x64 response, lags ~3 frames)
-  uint32_t loop_us;        // work time (steps 1-11, incl. UDP poll) of the
-                           //   PREVIOUS iteration; first sample reports 0
+  uint32_t loop_us;        // measured duration of this loop iteration
 };
 ```
 
@@ -184,33 +182,6 @@ If the motor reports a fault, or any state goes non-finite, or a Modbus exchange
 ## Build log and analysis code
 - Flush data received from the motor to an h5 log with teensy timestamps (maybe use teensy as the global clock?)
 - Write an accompanying jupyter notebook that loads in the h5 log and visualizes plots of time distribution for commands
-
-## Implementation Status
-
-**Teensy sketch (`teensy_cartpole_haptic/teensy_cartpole_haptic.ino`) — written 05/28/26.**
-- Binary UDP command protocol (opcodes 0x01–0x07) with packed telemetry (0xB0 batched, 0xB1 final summary).
-- Pendulum-only RK4 integrator (2-state, measured ẍ held constant via ZOH).
-- Force computation: f_pc from EOM coupling, mass-scaled motor command, mN clip.
-- Motor autozero via CTRL_REG_3 with MODE_OF_OPERATION read-back confirmation.
-- Sign self-check: asserts f_command > 0 for θ=0, θ̇=0, ẍ=+1 (inertial coupling at vertical rod; see corrected analysis below).
-- Safety: NaN detection, motor fault check, Modbus timeout → immediate motor sleep.
-- Extended PING reply includes Teensy `micros()` for NTP-style clock synchronization.
-- Sample struct includes `force_sensed_mN` (motor_tele.force_mn from 0x64 response) for command-delay analysis.
-
-**Python bench client (`haptic_bench.py`) — written 05/28/26.**
-- Binary protocol client: CONFIG, INIT, BEGIN/END, AUTOZERO, SLEEP.
-- Background receiver thread parses ACK/ERROR/telemetry/debug packets.
-- Clock sync via PING round-trips (11 rounds, best-RTT offset estimate).
-- HDF5 logging with all sample fields + physics params + clock offset as attributes.
-- Console summary: loop timing stats, Teensy→Mac latency (with 60 Hz budget check), drop detection, pendulum/force ranges.
-- CLI modes: `--ping-only`, `--autozero`, default full run with configurable params.
-
-**Analysis notebook (`haptic_analysis.ipynb`) — written 05/28/26.**
-- Loads HDF5 log, plots: loop period distribution/timeseries/overruns, Teensy→Mac latency (with batching sawtooth), motor command-vs-sensed cross-correlation to measure frame lag, pendulum state trajectories, force signals, packet drop analysis.
-
-### Sign check correction (vs original README spec)
-
-The README originally specified `assert f_command < 0` for the sign check. Analysis showed this is incorrect: at θ=0 the pendulum rod is vertical and exerts zero horizontal constraint force. The positive f_command at this test point reflects the inertial coupling term in the EOM (P = −m_p), not a restoring force. The sign check was corrected to `assert f_command > 0`. The pendulum reaction force becomes negative (restoring) only after the pendulum deflects to a nonzero angle.
 
 ## Out of Scope for Step 4
 
