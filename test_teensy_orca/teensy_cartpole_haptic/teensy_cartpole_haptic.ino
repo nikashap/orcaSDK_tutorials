@@ -39,6 +39,7 @@ uint16_t  macPort = 0;
 constexpr uint8_t  MOTOR_ADDR            = 0x01;
 constexpr uint32_t DEFAULT_BAUD          = 1000000;
 constexpr uint32_t DEFAULT_INTERFRAME_US = 100;
+constexpr uint32_t USER_COMMS_TIMEOUT_US = 500000; //500 milliseconds
 
 constexpr uint8_t FC_READ_HOLDING        = 0x03;
 constexpr uint8_t FC_WRITE_SINGLE        = 0x06;
@@ -112,6 +113,21 @@ double par_g            = 9.81;
 double par_max_force_mN = 0.0;
 uint32_t par_loop_us    = 1800;
 bool configured = false;
+
+// A single corrupted/short RS-422 frame should NOT kill the whole run, and we
+// can't afford to retry
+// Instead, hold the last good reading: the motor still
+// received our 0x64 force command (the TX went out fine; only the readback frame
+// glitched), so the physics does its forward pass with the previously read value
+// for whichever field failed and we move on with no added latency. A *genuine*
+// comms break is reported by the motor itself as COMMS_TIMEOUT (error bit 2048)
+// in the next valid frame, which the ex.errors check in the loop catches and
+// aborts on. These hold the most recent valid reading of each field; reset at
+// the start of haptic_loop().
+int32_t prev_position_um = 0;
+int32_t prev_speed_mmps  = 0;
+int32_t prev_accel_mmpss = 0;
+uint32_t modbus_glitch_count = 0;  // single-frame glitches held-over this run (diagnostic)
 
 // =====================================================================
 // Physics state
@@ -682,27 +698,51 @@ MotorExchange motor_exchange(int32_t force_mN) {
   MotorExchange ex = {};
   uint8_t tx[16], rx[32];
 
-  // Tx1: 0x64 force control
+  // Each transaction is a single attempt — no retry, so a glitch costs zero
+  // extra latency. On a bad/short frame we keep the previous good value for that
+  // field (held in prev_*) and carry on.
+
+  // Tx1: 0x64 force control + position/error readback.
   size_t tx_len = build_motor_stream(tx, SUB_FORCE_CTRL, force_mN);
+  // Small per-transaction gap timeout (5 ms): a glitched/missing reply must bail
+  // fast so hold-last-value adds no loop latency. NOT the motor's COMMS_TIMEOUT
+  // watchdog, which is a separate register.
   int n1 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 19);
-  bool ok_run = (n1 == 19) && parse_motor_stream_response(rx, n1);
-  if (ok_run) {
-    ex.position_um = motor_tele.position_um;
-    ex.errors      = motor_tele.errors;
+  if ((n1 == 19) && parse_motor_stream_response(rx, n1)) {
+    prev_position_um = motor_tele.position_um;
+    ex.errors        = motor_tele.errors;
+  } else {
+    modbus_glitch_count++;
   }
+  ex.position_um = prev_position_um;
 
   // Tx2: read shaft speed
   tx_len = build_read_holding(tx, REG_SHAFT_SPEED, 2);
   int n2 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
-  bool ok_speed = parse_read_holding_2reg_int32(rx, n2, &ex.speed_mmps);
+  int32_t speed_mmps;
+  if (parse_read_holding_2reg_int32(rx, n2, &speed_mmps)) {
+    prev_speed_mmps = speed_mmps;
+  } else {
+    modbus_glitch_count++;
+  }
+  ex.speed_mmps = prev_speed_mmps;
 
   // Tx3: read shaft acceleration
   tx_len = build_read_holding(tx, REG_SHAFT_ACCEL, 2);
   int n3 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
-  bool ok_accel = parse_read_holding_2reg_int32(rx, n3, &ex.accel_mmpss);
+  int32_t accel_mmpss;
+  if (parse_read_holding_2reg_int32(rx, n3, &accel_mmpss)) {
+    prev_accel_mmpss = accel_mmpss;
+  } else {
+    modbus_glitch_count++;
+  }
+  ex.accel_mmpss = prev_accel_mmpss;
 
   ex.t_meas_us = micros();
-  ex.ok = ok_run && ok_speed && ok_accel;
+  // A single-frame glitch is non-fatal (handled via hold-last-value above). The
+  // only abort condition is a motor-reported fault in ex.errors (e.g.
+  // COMMS_TIMEOUT 2048 on a genuine comms break), checked by the caller.
+  ex.ok = true;
   return ex;
 }
 
@@ -713,6 +753,10 @@ void haptic_loop() {
   double h_s = (double)par_loop_us * 1e-6;
   loop_cycle = 0;
   tele_count = 0;
+  modbus_glitch_count = 0;
+  prev_position_um = 0;
+  prev_speed_mmps  = 0;
+  prev_accel_mmpss = 0;
   Sample last_sample = {};
 
   // --- Initial step: compute initial force before main loop ---
@@ -739,14 +783,11 @@ void haptic_loop() {
     loop_timer = 0;
 
     // --- 1. Motor exchange: stream previous force, read kinematics ---
+    // A glitched readback frame is non-fatal: motor_exchange() holds the last
+    // good value for that field so the physics still steps forward this cycle.
+    // The only abort is a motor-reported fault below — COMMS_TIMEOUT (2048)
+    // surfaces there on a genuine comms break.
     MotorExchange ex = motor_exchange(prev_force_mN);
-
-    if (!ex.ok) {
-      motor_sleep_safe();
-      send_error(ERR_MODBUS_TIMEOUT);
-      flush_telemetry();
-      return;
-    }
 
     if (ex.errors != 0) {
       motor_sleep_safe();
@@ -811,6 +852,13 @@ void haptic_loop() {
         macPort = Udp.remotePort();
         if (pkt[0] == CMD_END || pkt[0] == CMD_SLEEP) {
           running = false;
+        } else if (pkt[0] == CMD_PING) {
+          // Answer PING inline so the Mac's end-of-session clock_sync() works
+          // while the loop is still streaming. Cheap and rare (only the ~11
+          // PINGs of a clock-sync burst, ~10 ms apart). This is the timebase
+          // the telemetry t_meas_us is stamped in, so it's the most useful
+          // anchor for post-hoc alignment.
+          send_ping_ack();
         }
       }
     }
@@ -829,6 +877,12 @@ void haptic_loop() {
   // --- Clean shutdown ---
   motor_sleep_safe();
   flush_telemetry();
+  {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "modbus glitches held-over: %lu",
+             (unsigned long)modbus_glitch_count);
+    send_info(msg);
+  }
   send_final_summary(last_sample, loop_cycle);
   send_ack(CMD_END);
 }
