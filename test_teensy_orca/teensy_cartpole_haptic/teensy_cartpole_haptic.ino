@@ -51,6 +51,12 @@ constexpr uint8_t SUB_SLEEP              = 0x00;
 constexpr uint8_t SUB_FORCE_CTRL         = 0x1C;  // FORCE_CMD register 28 (0x1C)
 constexpr uint8_t SUB_POSITION_CTRL      = 0x1E;  // POS_CMD   register 30 (0x1E); used by MOVE_TO
 
+// MOVE_TO: after the quintic trajectory finishes, keep streaming the setpoint
+// for up to this long so the motor's internal position PID can close any
+// remaining following error before we judge success. Exits early once within
+// the error threshold; failure is reported only if still outside it after this.
+constexpr uint32_t MOVE_SETTLE_US        = 500000;  // 0.5 s settle buffer
+
 constexpr uint16_t REG_SHAFT_SPEED       = 344;
 constexpr uint16_t REG_SHAFT_ACCEL       = 346;
 
@@ -1120,9 +1126,48 @@ void do_move_to(float setpoint_um_f, float duration_s, float loop_period_us_f,
     }
   }
 
-  // Final position check.
+  // Resolve the success threshold (default 100 um) up front — the settle phase
+  // below uses it for early termination.
   int32_t threshold = (int32_t)lroundf(error_threshold_um_f);
   if (threshold <= 0) threshold = 100;  // default 100 um
+
+  // ---- Settle phase: hold the setpoint, let the motor's PID converge --------
+  // The quintic ends with a zero-velocity command at setpoint, but for an
+  // aggressive/long span the position-PID loop can still have a following error
+  // at trajectory end. Keep streaming the setpoint for up to MOVE_SETTLE_US,
+  // polling the readback each loop period, and exit the moment we are within
+  // threshold. If the buffer elapses still outside threshold, the final check
+  // below reports ERR_MOVE_FAILED.
+  {
+    elapsedMicros settle_timer = 0;
+    while ((uint32_t)settle_timer < MOVE_SETTLE_US) {
+      step_timer = 0;
+
+      uint8_t tx[16], rx[32];
+      size_t tx_len = build_motor_stream(tx, SUB_POSITION_CTRL, setpoint_um);
+      int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 19);
+      if (n == 19 && parse_motor_stream_response(rx, n)) {
+        last_pos_um = motor_tele.position_um;
+        if (motor_tele.errors != 0) {
+          motor_sleep_safe();
+          send_error_with_pos(ERR_MOVE_FAILED, last_pos_um);
+          return;
+        }
+        int32_t e = last_pos_um - setpoint_um;
+        if (e < 0) e = -e;
+        if (e <= threshold) break;   // converged → report success
+      } else {
+        modbus_glitch_count++;       // glitched readback non-fatal; hold last_pos_um
+      }
+
+      // Pace to loop_us.
+      while ((uint32_t)step_timer < loop_us) {
+        // spin
+      }
+    }
+  }
+
+  // Final position check (after the trajectory + settle phase).
   int32_t err = last_pos_um - setpoint_um;
   if (err < 0) err = -err;
   if (err <= threshold) {
