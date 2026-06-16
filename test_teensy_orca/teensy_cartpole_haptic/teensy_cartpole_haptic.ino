@@ -48,7 +48,8 @@ constexpr uint8_t FC_MANAGE_STREAM       = 0x41;
 constexpr uint8_t FC_MOTOR_CMD_STREAM    = 0x64;
 
 constexpr uint8_t SUB_SLEEP              = 0x00;
-constexpr uint8_t SUB_FORCE_CTRL         = 0x1C;
+constexpr uint8_t SUB_FORCE_CTRL         = 0x1C;  // FORCE_CMD register 28 (0x1C)
+constexpr uint8_t SUB_POSITION_CTRL      = 0x1E;  // POS_CMD   register 30 (0x1E); used by MOVE_TO
 
 constexpr uint16_t REG_SHAFT_SPEED       = 344;
 constexpr uint16_t REG_SHAFT_ACCEL       = 346;
@@ -77,12 +78,18 @@ constexpr uint8_t CMD_INIT     = 0x04;
 constexpr uint8_t CMD_BEGIN    = 0x05;
 constexpr uint8_t CMD_END      = 0x06;
 constexpr uint8_t CMD_SLEEP    = 0x07;
+// Task 1/2 (Step 7) fully-actuated modes. The 0x01–0x07 haptic path is untouched.
+constexpr uint8_t CMD_ENTER_COR = 0x08;  // enter center-out-reach mode (force, base 0, no physics)
+constexpr uint8_t CMD_MOVE_TO   = 0x09;  // quintic position move to a setpoint
+constexpr uint8_t CMD_EXIT_MODE = 0x0A;  // leave COR/MOVE_TO, return to idle
+// 0x0B–0x0F reserved for Tasks 3/4 → ERR_BADOP.
 
 // Reply opcodes (Teensy → Mac)
-constexpr uint8_t REPLY_ACK   = 0xA1;
-constexpr uint8_t REPLY_ERROR = 0xA2;
-constexpr uint8_t TELE_BATCH  = 0xB0;
-constexpr uint8_t TELE_FINAL  = 0xB1;
+constexpr uint8_t REPLY_ACK     = 0xA1;
+constexpr uint8_t REPLY_ERROR   = 0xA2;
+constexpr uint8_t TELE_BATCH    = 0xB0;  // full haptic Sample batch (Task 0)
+constexpr uint8_t TELE_FINAL    = 0xB1;
+constexpr uint8_t TELE_BATCH_COR = 0xB2;  // reduced SampleCOR batch (Tasks 1, 2)
 
 // Error codes
 constexpr uint8_t ERR_BADOP           = 0x01;
@@ -92,15 +99,19 @@ constexpr uint8_t ERR_SIGN_CHECK      = 0x04;
 constexpr uint8_t ERR_NAN_STATE       = 0x05;
 constexpr uint8_t ERR_MODBUS_TIMEOUT  = 0x06;
 constexpr uint8_t ERR_NOT_CONFIGURED  = 0x07;
+constexpr uint8_t ERR_MOVE_FAILED     = 0x08;  // MOVE_TO ended outside threshold or faulted
 
 // Expected payload sizes per opcode
-constexpr size_t PAYLOAD_PING     = 0;
-constexpr size_t PAYLOAD_AUTOZERO = 0;
-constexpr size_t PAYLOAD_CONFIG   = 28;  // 7 × float
-constexpr size_t PAYLOAD_INIT     = 16;  // 4 × float
-constexpr size_t PAYLOAD_BEGIN    = 0;
-constexpr size_t PAYLOAD_END      = 0;
-constexpr size_t PAYLOAD_SLEEP_CMD= 0;
+constexpr size_t PAYLOAD_PING      = 0;
+constexpr size_t PAYLOAD_AUTOZERO  = 0;
+constexpr size_t PAYLOAD_CONFIG    = 28;  // 7 × float
+constexpr size_t PAYLOAD_INIT      = 16;  // 4 × float
+constexpr size_t PAYLOAD_BEGIN     = 0;
+constexpr size_t PAYLOAD_END       = 0;
+constexpr size_t PAYLOAD_SLEEP_CMD = 0;
+constexpr size_t PAYLOAD_ENTER_COR = 0;
+constexpr size_t PAYLOAD_MOVE_TO   = 16;  // 4 × float: setpoint_um, duration_s, loop_period_us, error_threshold_um
+constexpr size_t PAYLOAD_EXIT_MODE = 0;
 
 // =====================================================================
 // Physics parameters (set by CMD_CONFIG)
@@ -161,6 +172,25 @@ static_assert(sizeof(Sample) == 48, "Sample struct packing");
 constexpr int MAX_SAMPLES_PER_PACKET = 8;
 Sample   tele_buf[MAX_SAMPLES_PER_PACKET];
 uint8_t  tele_count = 0;
+
+// =====================================================================
+// Reduced telemetry for COR mode (Tasks 1, 2) — the haptic Sample with
+// the pendulum-only fields (theta, thetadot, fx, fpc, force_sensed_mN)
+// removed. Distinct discriminator byte (TELE_BATCH_COR = 0xB2).
+//
+// Python struct format: '<II4fI'   Total: 4+4 + 4*4 + 4 = 28 bytes
+// =====================================================================
+struct __attribute__((packed)) SampleCOR {
+  uint32_t cycle;
+  uint32_t t_meas_us;     // micros() at the moment xddot was measured
+  float    x, xdot, xddot;// measured shaft state (SI)
+  float    f_command_mN;  // commanded force (base 0 + future friction boost)
+  uint32_t loop_us;
+};
+static_assert(sizeof(SampleCOR) == 28, "SampleCOR struct packing");
+
+SampleCOR cor_tele_buf[MAX_SAMPLES_PER_PACKET];
+uint8_t   cor_tele_count = 0;
 
 // =====================================================================
 // Motor telemetry from 0x64 response
@@ -440,6 +470,25 @@ void push_sample(const Sample& s) {
   tele_buf[tele_count++] = s;
   if (tele_count >= MAX_SAMPLES_PER_PACKET) {
     flush_telemetry();
+  }
+}
+
+// --- COR telemetry batching (leading byte TELE_BATCH_COR = 0xB2) ---
+void flush_telemetry_cor() {
+  if (cor_tele_count == 0 || macPort == 0) return;
+  uint8_t hdr[2] = { TELE_BATCH_COR, cor_tele_count };
+  Udp.beginPacket(macIP, macPort);
+  Udp.write(hdr, 2);
+  Udp.write((const uint8_t*)cor_tele_buf,
+            (size_t)cor_tele_count * sizeof(SampleCOR));
+  Udp.endPacket();
+  cor_tele_count = 0;
+}
+
+void push_sample_cor(const SampleCOR& s) {
+  cor_tele_buf[cor_tele_count++] = s;
+  if (cor_tele_count >= MAX_SAMPLES_PER_PACKET) {
+    flush_telemetry_cor();
   }
 }
 
@@ -888,6 +937,202 @@ void haptic_loop() {
 }
 
 // =====================================================================
+// COR loop (Tasks 1, 2) — center-out-reach mode.
+//
+// Same motor exchange as the haptic loop (force stream + speed + accel
+// reads), but the commanded force is a fixed base of 0 (transparent shaft)
+// and there is NO pendulum integration. Streams reduced SampleCOR records
+// (leading byte TELE_BATCH_COR = 0xB2). Exits on EXIT_MODE / END / SLEEP and
+// acks the opcode that triggered the exit.
+// =====================================================================
+void cor_loop() {
+  loop_cycle = 0;
+  cor_tele_count = 0;
+  modbus_glitch_count = 0;
+  prev_position_um = 0;
+  prev_speed_mmps  = 0;
+  prev_accel_mmpss = 0;
+
+  // Base command is 0. The FSR-driven stiction boost will be added here once
+  // the force-sensing handle exists, gated by stiction_velocity_threshold and
+  // scaled by friction_boost_gain (both sent from the Mac in a later round).
+  // TODO(friction): base_force_mN = 0 + friction_boost(...); contributes 0 now.
+  int32_t base_force_mN = 0;
+
+  send_ack(CMD_ENTER_COR);
+
+  elapsedMicros loop_timer;
+  bool     running   = true;
+  uint8_t  exit_op   = CMD_EXIT_MODE;  // opcode to ack on exit
+  uint32_t prev_loop_us = 0;
+
+  while (running) {
+    loop_timer = 0;
+
+    // --- 1. Motor exchange: stream base force, read kinematics ---
+    MotorExchange ex = motor_exchange(base_force_mN);
+    if (ex.errors != 0) {
+      motor_sleep_safe();
+      send_error_with_fault(ERR_MOTOR_FAULT, ex.errors);
+      flush_telemetry_cor();
+      return;
+    }
+
+    // --- 2. Overwrite shaft state from motor (SI). No physics step. ---
+    st_x     = (double)ex.position_um * 1e-6;
+    st_xdot  = (double)ex.speed_mmps  * 1e-3;
+    st_xddot = (double)ex.accel_mmpss * 1e-3;
+
+    // --- 3. Record reduced telemetry ---
+    SampleCOR s;
+    s.cycle        = loop_cycle;
+    s.t_meas_us    = ex.t_meas_us;
+    s.x            = (float)st_x;
+    s.xdot         = (float)st_xdot;
+    s.xddot        = (float)st_xddot;
+    s.f_command_mN = (float)base_force_mN;
+    s.loop_us      = prev_loop_us;
+    push_sample_cor(s);
+
+    loop_cycle++;
+
+    // --- 4. Check for UDP commands (non-blocking) ---
+    int sz = Udp.parsePacket();
+    if (sz > 0) {
+      uint8_t pkt[64];
+      int pn = Udp.read(pkt, sizeof(pkt));
+      if (pn > 0) {
+        macIP   = Udp.remoteIP();
+        macPort = Udp.remotePort();
+        if (pkt[0] == CMD_EXIT_MODE || pkt[0] == CMD_END || pkt[0] == CMD_SLEEP) {
+          running = false;
+          exit_op = pkt[0];
+        } else if (pkt[0] == CMD_PING) {
+          send_ping_ack();  // inline so end-of-session clock_sync works mid-stream
+        }
+      }
+    }
+
+    prev_loop_us = (uint32_t)loop_timer;
+
+    // --- 5. Pace the loop ---
+    while ((uint32_t)loop_timer < par_loop_us) {
+      // spin
+    }
+  }
+
+  // --- Clean shutdown: sleep motor (transparent handoff done), flush, ack ---
+  motor_sleep_safe();
+  flush_telemetry_cor();
+  send_ack(exit_op);
+}
+
+// =====================================================================
+// Position-aware reply helpers (MOVE_TO). The achieved final position is
+// appended as a little-endian int32 (µm) for Mac-side logging.
+// =====================================================================
+void send_ack_with_pos(uint8_t cmd_opcode, int32_t pos_um) {
+  if (macPort == 0) return;
+  uint8_t buf[6];
+  buf[0] = REPLY_ACK;
+  buf[1] = cmd_opcode;
+  memcpy(buf + 2, &pos_um, 4);  // little-endian on ARM
+  Udp.beginPacket(macIP, macPort);
+  Udp.write(buf, 6);
+  Udp.endPacket();
+}
+
+void send_error_with_pos(uint8_t err_code, int32_t pos_um) {
+  if (macPort == 0) return;
+  uint8_t buf[6];
+  buf[0] = REPLY_ERROR;
+  buf[1] = err_code;
+  memcpy(buf + 2, &pos_um, 4);
+  Udp.beginPacket(macIP, macPort);
+  Udp.write(buf, 6);
+  Udp.endPacket();
+}
+
+// =====================================================================
+// MOVE_TO (Tasks 1, 2) — quintic minimum-jerk position move.
+//
+// Drives the motor in Position Mode (stream sub-code SUB_POSITION_CTRL = 0x1E)
+// along a minimum-jerk profile from the current shaft position to setpoint_um
+// over duration_s, sampled at loop_period_us. Used to home the shaft to
+// stroke-centre at trial start. On completion replies ACK 0x09 + int32
+// final_pos when |final - setpoint| <= error_threshold_um, else ERROR
+// ERR_MOVE_FAILED + int32 final_pos. On motor fault, sleeps and reports
+// ERR_MOVE_FAILED. Leaves the motor holding the last position command (no
+// sleep) on success so a following CMD_ENTER_COR hands off promptly.
+// =====================================================================
+void do_move_to(float setpoint_um_f, float duration_s, float loop_period_us_f,
+                float error_threshold_um_f) {
+  // Read current position as the trajectory start (one force-0 exchange).
+  prev_position_um = 0;
+  prev_speed_mmps  = 0;
+  prev_accel_mmpss = 0;
+  MotorExchange ex0 = motor_exchange(0);
+  if (ex0.errors != 0) {
+    motor_sleep_safe();
+    send_error_with_pos(ERR_MOVE_FAILED, ex0.position_um);
+    return;
+  }
+
+  int32_t start_um    = ex0.position_um;
+  int32_t setpoint_um = (int32_t)lroundf(setpoint_um_f);
+  double  span_um     = (double)setpoint_um - (double)start_um;
+
+  uint32_t loop_us = (uint32_t)(loop_period_us_f + 0.5f);
+  if (loop_us < 200) loop_us = 200;       // floor; avoid runaway / div-by-zero
+  double T = (double)duration_s;
+  if (T < 1e-3) T = 1e-3;
+  uint32_t nsteps = (uint32_t)(T * 1e6 / (double)loop_us);
+  if (nsteps < 1) nsteps = 1;
+
+  int32_t last_pos_um = start_um;
+  elapsedMicros step_timer;
+
+  for (uint32_t i = 1; i <= nsteps; i++) {
+    step_timer = 0;
+
+    double tau = (double)i / (double)nsteps;                      // 0..1
+    double s   = tau*tau*tau*(10.0 - 15.0*tau + 6.0*tau*tau);     // 10t^3-15t^4+6t^5
+    int32_t pos_um = start_um + (int32_t)lround(span_um * s);
+
+    // Stream the position command; read back position + errors.
+    uint8_t tx[16], rx[32];
+    size_t tx_len = build_motor_stream(tx, SUB_POSITION_CTRL, pos_um);
+    int n = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 19);
+    if (n == 19 && parse_motor_stream_response(rx, n)) {
+      last_pos_um = motor_tele.position_um;
+      if (motor_tele.errors != 0) {
+        motor_sleep_safe();
+        send_error_with_pos(ERR_MOVE_FAILED, last_pos_um);
+        return;
+      }
+    } else {
+      modbus_glitch_count++;  // single glitched readback is non-fatal; hold last_pos_um
+    }
+
+    // Pace to loop_us.
+    while ((uint32_t)step_timer < loop_us) {
+      // spin
+    }
+  }
+
+  // Final position check.
+  int32_t threshold = (int32_t)lroundf(error_threshold_um_f);
+  if (threshold <= 0) threshold = 100;  // default 100 um
+  int32_t err = last_pos_um - setpoint_um;
+  if (err < 0) err = -err;
+  if (err <= threshold) {
+    send_ack_with_pos(CMD_MOVE_TO, last_pos_um);
+  } else {
+    send_error_with_pos(ERR_MOVE_FAILED, last_pos_um);
+  }
+}
+
+// =====================================================================
 // Command handler (binary protocol)
 // =====================================================================
 void handle_command(const uint8_t* pkt, size_t len) {
@@ -1010,6 +1255,32 @@ void handle_command(const uint8_t* pkt, size_t len) {
     motor_sleep_safe();
     phase = Phase::IDLE;
     send_ack(CMD_SLEEP);
+    break;
+
+  case CMD_ENTER_COR: {
+    if (payload_len != PAYLOAD_ENTER_COR) { send_error(ERR_BADLEN); return; }
+    // Motor must be connected (via CMD_CONFIG or CMD_AUTOZERO) to run the exchange.
+    if (!motor_connected) { send_error(ERR_NOT_CONFIGURED); return; }
+    phase = Phase::RUNNING;
+    cor_loop();              // blocks until EXIT_MODE/END/SLEEP; acks internally
+    phase = Phase::CONFIGURED;
+    break;
+  }
+
+  case CMD_MOVE_TO: {
+    if (payload_len != PAYLOAD_MOVE_TO) { send_error(ERR_BADLEN); return; }
+    if (!motor_connected) { send_error(ERR_NOT_CONFIGURED); return; }
+    float vals[4];
+    memcpy(vals, payload, 16);  // setpoint_um, duration_s, loop_period_us, error_threshold_um
+    do_move_to(vals[0], vals[1], vals[2], vals[3]);   // replies internally
+    break;
+  }
+
+  case CMD_EXIT_MODE:
+    // Only meaningful inside cor_loop()/do_move_to() (handled there). Received at
+    // idle, just ack so the Mac's exit_cor() doesn't time out.
+    if (payload_len != PAYLOAD_EXIT_MODE) { send_error(ERR_BADLEN); return; }
+    send_ack(CMD_EXIT_MODE);
     break;
 
   default:

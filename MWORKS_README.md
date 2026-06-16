@@ -1,5 +1,13 @@
 # Step 6 — MWorks Integration
 
+> **Status: integrated and running — bring-up completed 2026-06-02.**
+> The experiment runs end-to-end (autozero → config → init → begin → 60 s trial →
+> end clock sync → clean shutdown and replay) without visual lag or premature
+> termination. The bring-up surfaced several issues whose fixes **supersede parts
+> of the spec below** (notably the per-sample `sample_*` setvar scheme in §"Telemetry
+> batch processing", which was removed). See **Debugging & Changes (bring-up)** at
+> the end of this file for the authoritative list of what was changed and why.
+
 ## Purpose
 
 Replace the Mac-side MuJoCo control loop with a thin UDP client that talks to the Teensy haptic sketch from Step 4 (`teensy_cartpole_haptic.ino`). MWorks continues to handle the experiment trial logic, visual rendering, and logging; it no longer participates in physics or motor control. The Teensy is the sole owner of the haptic loop.
@@ -292,3 +300,96 @@ The `t_meas_us` field is the authoritative timing for any per-sample analysis. T
 - Friction-table loading on the Teensy (deferred to "Step 4 modified with Step 3's friction table" per `CLAUDE.md`).
 - Force-sensor input.
 - Any control-loop logic on the Mac. If you find yourself writing a control loop in `teensy_interface.py`, stop — that's a sign of architecture drift.
+
+## Debugging & Changes (bring-up — completed 2026-06-02)
+
+The first end-to-end MWorks runs showed two symptoms: the visual pendulum
+progressively lagged behind the real haptic feel, and the Teensy aborted mid-trial
+with `ERR_MODBUS_TIMEOUT`, which terminated the experiment early. Investigation of
+the CSV/`.mwk2` logs showed the UDP/RX path had no lag — the problem was downstream
+in MWorks event processing. The fixes below resolved both symptoms; the run now
+completes the full trial and replays cleanly.
+
+### 1. Visual lag — removed the per-sample `setvar` storm (supersedes §"Telemetry batch processing")
+
+The original spec pushed all 13 `sample_*` fields through `setvar` for **every**
+sample in **every** batch (~9,600 `setvar`/s). This floods the MWorks event stream;
+the display falls further behind real time the longer a trial runs.
+
+**Change:** `teensy_interface._process_telemetry()` now sets only the four
+`rendered_*` variables once per batch (from the most-recent sample) for the visual
+scene. The full per-sample history is written to the CSV `DataLogger` only. The
+`sample_*` `var group` was removed from `cart_pendulum.mwel`. **The §"Telemetry
+batch processing" step 4 (per-sample setvars) and the `sample_*` variable list are
+obsolete — do not re-add a per-sample `setvar` loop.** Per-sample timing analysis
+is done from the CSV (`received_at_s`, `batch_index`, `sample_offset`, `t_meas_us`),
+which is lossless and doesn't load the MWorks event loop.
+
+### 2. Re-run crash — re-entrant socket / `start()` (Mac-side)
+
+The Python module loads once; module-level objects persist across protocol re-runs
+(MWorks does not re-import on replay). `cleanup()` closed the UDP socket, so a second
+run reused a dead file descriptor → `[Errno 9] Bad file descriptor`.
+
+**Change:** factored socket creation into `_open_socket()` and made `start()`
+re-entrant — it reopens the socket and clears the `_closed`/`_shutdown` flags (and
+re-enables autozero, since the motor was slept on the prior cleanup) when a previously
+closed interface is started again.
+
+### 3. End-of-session clock sync — service `CMD_PING` inside the haptic loop (firmware)
+
+The end-of-session `clock_sync()` runs *while the loop is still streaming*. The loop
+didn't service `CMD_PING`, so no PING round succeeded and the second clock-sync anchor
+was missing ("no PING round succeeded").
+
+**Change:** the loop's step-11 UDP poll now answers `CMD_PING` inline
+(`send_ping_ack()`) in addition to handling `CMD_END`/`CMD_SLEEP`. Both clock-sync
+anchors are now captured, enabling skew-corrected post-hoc alignment.
+
+### 4. Modbus timeouts — hold-last-value instead of retry (firmware)
+
+Occasional single-frame RS-422 glitches were aborting the whole run via
+`ERR_MODBUS_TIMEOUT`. A bounded-retry approach was tried first but rejected: a retry
+adds a whole extra transaction (~0.6 ms) of jitter to the affected cycle.
+
+**Change:** `motor_exchange()` now does a **single attempt per transaction with
+hold-last-value**. On a glitched/short readback frame it keeps the previous good value
+for that field (`prev_position_um` / `prev_speed_mmps` / `prev_accel_mmpss`), bumps a
+`modbus_glitch_count` diagnostic, and the physics steps forward with no added latency —
+the motor still received the `0x64` force command (the TX went out fine; only the
+readback frame glitched). The **only** abort condition is a motor-reported fault in
+`ex.errors`; a genuine comms break surfaces there as the Orca's `COMMS_TIMEOUT`
+(error bit 2048) in the next valid frame. A clean shutdown reports
+`modbus glitches held-over: N`.
+
+### 5. In-loop Modbus gap timeout kept small — distinct from the motor watchdog
+
+`modbus_transact`'s `timeout_us` is the Teensy-side **inter-byte / wait-for-reply gap
+timeout** (the timer resets on every received byte), *not* the Orca's `COMMS_TIMEOUT`
+watchdog register. Because a no-reply transaction blocks for the whole timeout before
+bailing, a large value here would stall the 1.4 ms loop for the full duration and
+defeat the zero-latency hold-last-value design (and could itself trip the motor's
+watchdog).
+
+**Change:** the three in-loop transactions in `motor_exchange()` use a **5000 µs**
+gap timeout, so a missing/truncated reply bails within ~5 ms and falls back to the
+held value. The one-time setup transactions (autozero, `verify_motor_present`, etc.)
+run outside the real-time loop and keep the longer `USER_COMMS_TIMEOUT_US`.
+
+# Post Step 6 - Analyzing MWorks and csv files
+
+## Goal
+Create a jupyter notebook at `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_teensy/teensy_mworks_analysis.ipynb` that plots time distributions of key loops in the experiment (i.e., the haptic control loop, the rendering loop, the approximate time it takes to send data from teensy to MWorks, etc)
+
+## Reference script
+See `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_chris/explore_mwk2.ipynb` for an example interactive analysis and brainstorming script that used the previous FTDI + serial implementation of the control loop
+
+## Location of most recent code runs
+Mworks file: `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_teensy/mwk_logs/jazlabamini-cart_pendulum-20260602-162707.mwk2`
+
+## CSV scripts associated with the mworks file listed above:
+- `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_teensy/datalogger_logs/teensy_log_20260602_162709.csv`
+- `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_teensy/datalogger_logs/teensy_log_20260602_162831.csv`
+- `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_teensy/datalogger_logs/teensy_log_20260602_162943.csv`
+
+NOTE that the pause/play button was hit three times in the experiment, which is why there are three csv files for this particular June 2nd run.
