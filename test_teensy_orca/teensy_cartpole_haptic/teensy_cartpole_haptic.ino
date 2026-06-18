@@ -88,7 +88,10 @@ constexpr uint8_t CMD_SLEEP    = 0x07;
 constexpr uint8_t CMD_ENTER_COR = 0x08;  // enter center-out-reach mode (force, base 0, no physics)
 constexpr uint8_t CMD_MOVE_TO   = 0x09;  // quintic position move to a setpoint
 constexpr uint8_t CMD_EXIT_MODE = 0x0A;  // leave COR/MOVE_TO, return to idle
-// 0x0B–0x0F reserved for Tasks 3/4 → ERR_BADOP.
+// Handle force-boost (Step 3 Part C). Cross-task; the Mac sends it once at
+// session bring-up (before any loop) to capture the resting handle baseline.
+constexpr uint8_t CMD_CALIBRATE_HANDLE = 0x0B;  // 2 s handle baseline capture
+// 0x0C–0x0F reserved for Tasks 3/4 → ERR_BADOP.
 
 // Reply opcodes (Teensy → Mac)
 constexpr uint8_t REPLY_ACK     = 0xA1;
@@ -106,6 +109,7 @@ constexpr uint8_t ERR_NAN_STATE       = 0x05;
 constexpr uint8_t ERR_MODBUS_TIMEOUT  = 0x06;
 constexpr uint8_t ERR_NOT_CONFIGURED  = 0x07;
 constexpr uint8_t ERR_MOVE_FAILED     = 0x08;  // MOVE_TO ended outside threshold or faulted
+constexpr uint8_t ERR_HANDLE_CAL      = 0x09;  // handle baseline implausible (wide band / rail-pinned)
 
 // Expected payload sizes per opcode
 constexpr size_t PAYLOAD_PING      = 0;
@@ -118,6 +122,7 @@ constexpr size_t PAYLOAD_SLEEP_CMD = 0;
 constexpr size_t PAYLOAD_ENTER_COR = 0;
 constexpr size_t PAYLOAD_MOVE_TO   = 16;  // 4 × float: setpoint_um, duration_s, loop_period_us, error_threshold_um
 constexpr size_t PAYLOAD_EXIT_MODE = 0;
+constexpr size_t PAYLOAD_CALIBRATE_HANDLE = 0;
 
 // =====================================================================
 // Physics parameters (set by CMD_CONFIG)
@@ -130,6 +135,40 @@ double par_g            = 9.81;
 double par_max_force_mN = 0.0;
 uint32_t par_loop_us    = 1800;
 bool configured = false;
+
+// =====================================================================
+// Force-sensing handle — boost_human (Step 3 Part C, STICTION_BOOST_README)
+//
+// The handle is an AD620-amplified Wheatstone bridge read on A0 (FORCE_PIN in
+// wheatstone.ino). Its resting voltage drifts session-to-session, so we capture
+// a fresh [baseline_min, baseline_max] band with CMD_CALIBRATE_HANDLE before any
+// loop runs. boost_human_mN() maps voltage outside that band to a signed assist
+// force; inside the band it is exactly 0. Not velocity-gated. Until a successful
+// calibration, handle_calibrated stays false and the boost is forced to 0, so
+// the COR loop behaves exactly as it did before the handle existed.
+// =====================================================================
+constexpr int   HANDLE_PIN   = A0;       // matches wheatstone.ino FORCE_PIN
+constexpr float ADC_VREF     = 3.3f;     // Teensy 4.1 analog reference (V)
+constexpr float ADC_FULLSCALE = 4095.0f; // 12-bit range 0..4095 (wheatstone.ino line 17)
+
+// boost_human shape (mN). BOOST_MIN at the ramp edge (±DV past the band),
+// asymptoting to BOOST_MAX at the rail. k, m are shape constants — bench-tunable
+// (see STICTION_BOOST_README "Open items"); start values per the README.
+constexpr float BOOST_MIN_MN = 12000.0f; // 12 N at the ramp edge
+constexpr float BOOST_MAX_MN = 15000.0f; // plateau toward this at the rail
+constexpr float BOOST_DV     = 0.20f;    // onset margin past the band (V)
+constexpr float BOOST_K      = 3.0f;     // exponential ramp shape
+constexpr float BOOST_M      = 4.0f;     // saturation curvature toward the rail
+
+// Calibration bounds (STICTION_BOOST_README C.0): reject an implausible baseline.
+constexpr float HANDLE_CAL_SECONDS   = 2.0f;
+constexpr float HANDLE_CAL_MAX_BAND  = 0.40f;  // resting band wider than this → reject
+constexpr float HANDLE_CAL_RAIL_LO   = 0.50f;  // min below this → pinned low → reject
+constexpr float HANDLE_CAL_RAIL_HI   = 3.00f;  // max above this → pinned high → reject
+
+float handle_baseline_min = 0.0f;
+float handle_baseline_max = 0.0f;
+bool  handle_calibrated   = false;
 
 // A single corrupted/short RS-422 frame should NOT kill the whole run, and we
 // can't afford to retry
@@ -182,18 +221,22 @@ uint8_t  tele_count = 0;
 // =====================================================================
 // Reduced telemetry for COR mode (Tasks 1, 2) — the haptic Sample with
 // the pendulum-only fields (theta, thetadot, fx, fpc, force_sensed_mN)
-// removed. Distinct discriminator byte (TELE_BATCH_COR = 0xB2).
+// removed, plus the handle force-boost fields (Step 3 Part C) appended so the
+// boost_human mapping can be verified on the bench. Distinct discriminator byte
+// (TELE_BATCH_COR = 0xB2).
 //
-// Python struct format: '<II4fI'   Total: 4+4 + 4*4 + 4 = 28 bytes
+// Python struct format: '<II6fI'   Total: 4+4 + 6*4 + 4 = 36 bytes
 // =====================================================================
 struct __attribute__((packed)) SampleCOR {
   uint32_t cycle;
   uint32_t t_meas_us;     // micros() at the moment xddot was measured
   float    x, xdot, xddot;// measured shaft state (SI)
-  float    f_command_mN;  // commanded force (base 0 + future friction boost)
+  float    f_command_mN;  // commanded force after boost + safety clip
+  float    handle_voltage;// raw handle ADC voltage this cycle (V)
+  float    boost_human_mN;// boost_human before the safety clip (signed mN)
   uint32_t loop_us;
 };
-static_assert(sizeof(SampleCOR) == 28, "SampleCOR struct packing");
+static_assert(sizeof(SampleCOR) == 36, "SampleCOR struct packing");
 
 SampleCOR cor_tele_buf[MAX_SAMPLES_PER_PACKET];
 uint8_t   cor_tele_count = 0;
@@ -802,6 +845,89 @@ MotorExchange motor_exchange(int32_t force_mN) {
 }
 
 // =====================================================================
+// Force-sensing handle: read, boost mapping, calibration (Step 3 Part C)
+// =====================================================================
+
+// C.1 — one ADC read per control cycle. 12-bit range 0..4095 (the stale
+// "0-8191" comment in wheatstone.ino is wrong; its own math uses 4095).
+float read_handle_voltage() {
+  int raw = analogRead(HANDLE_PIN);
+  return (float)raw * (ADC_VREF / ADC_FULLSCALE);
+}
+
+// C.2 — boost_human: handle voltage → signed assist force (mN). Zero inside the
+// measured deadband; exponential ramp 0→±BOOST_MIN over DV past the band edge;
+// then asymptotic plateau toward ±BOOST_MAX at the rail (3.3 V right / 0 V left).
+// Continuous, monotonic, sign = push direction. Depends ONLY on voltage (not
+// velocity-gated). Returns 0 until a successful CMD_CALIBRATE_HANDLE.
+float boost_human_mN(float v) {
+  if (!handle_calibrated) return 0.0f;
+
+  const float b_lo = handle_baseline_min;
+  const float b_hi = handle_baseline_max;
+
+  if (v >= b_lo && v <= b_hi) return 0.0f;   // deadband
+
+  if (v > b_hi) {
+    // Rightward (push right → position increases): positive boost.
+    if (v <= b_hi + BOOST_DV) {
+      float u = (v - b_hi) / BOOST_DV;                       // 0..1
+      return BOOST_MIN_MN * (expf(BOOST_K * u) - 1.0f) / (expf(BOOST_K) - 1.0f);
+    }
+    float denom = ADC_VREF - (b_hi + BOOST_DV);
+    float w = (denom > 1e-6f) ? (v - (b_hi + BOOST_DV)) / denom : 1.0f;
+    if (w > 1.0f) w = 1.0f;
+    float f = BOOST_MAX_MN - (BOOST_MAX_MN - BOOST_MIN_MN) * expf(-BOOST_M * w);
+    return (f > BOOST_MAX_MN) ? BOOST_MAX_MN : f;
+  } else {
+    // Leftward (push left → position decreases): mirror image, negative boost.
+    if (v >= b_lo - BOOST_DV) {
+      float u = (b_lo - v) / BOOST_DV;                       // 0..1
+      return -BOOST_MIN_MN * (expf(BOOST_K * u) - 1.0f) / (expf(BOOST_K) - 1.0f);
+    }
+    float denom = b_lo - BOOST_DV;                           // band edge → 0 V rail
+    float w = (denom > 1e-6f) ? ((b_lo - BOOST_DV) - v) / denom : 1.0f;
+    if (w > 1.0f) w = 1.0f;
+    float f = BOOST_MAX_MN - (BOOST_MAX_MN - BOOST_MIN_MN) * expf(-BOOST_M * w);
+    return -((f > BOOST_MAX_MN) ? BOOST_MAX_MN : f);
+  }
+}
+
+// C.0 — sample the resting handle for HANDLE_CAL_SECONDS, returning the measured
+// min/max voltage. Result valid only if the band is narrow and off the rails.
+bool calibrate_handle(float* out_min, float* out_max) {
+  float vmin = 1e9f, vmax = -1e9f;
+  elapsedMicros t = 0;
+  uint32_t window_us = (uint32_t)(HANDLE_CAL_SECONDS * 1e6f);
+  while ((uint32_t)t < window_us) {
+    float v = read_handle_voltage();
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+    delayMicroseconds(500);  // ~4000 samples over 2 s
+  }
+  *out_min = vmin;
+  *out_max = vmax;
+  if ((vmax - vmin) > HANDLE_CAL_MAX_BAND) return false;  // implausibly wide
+  if (vmin < HANDLE_CAL_RAIL_LO) return false;            // pinned low
+  if (vmax > HANDLE_CAL_RAIL_HI) return false;            // pinned high
+  return true;
+}
+
+// ACK/ERROR reply carrying the measured baseline (two little-endian floats), so
+// the Mac logs the band per session even when calibration fails.
+void send_handle_cal_reply(uint8_t tag, uint8_t code, float vmin, float vmax) {
+  if (macPort == 0) return;
+  uint8_t buf[10];
+  buf[0] = tag;
+  buf[1] = code;
+  memcpy(buf + 2, &vmin, 4);  // little-endian on ARM
+  memcpy(buf + 6, &vmax, 4);
+  Udp.beginPacket(macIP, macPort);
+  Udp.write(buf, 10);
+  Udp.endPacket();
+}
+
+// =====================================================================
 // Main haptic loop
 // =====================================================================
 void haptic_loop() {
@@ -959,11 +1085,10 @@ void cor_loop() {
   prev_speed_mmps  = 0;
   prev_accel_mmpss = 0;
 
-  // Base command is 0. The FSR-driven stiction boost will be added here once
-  // the force-sensing handle exists, gated by stiction_velocity_threshold and
-  // scaled by friction_boost_gain (both sent from the Mac in a later round).
-  // TODO(friction): base_force_mN = 0 + friction_boost(...); contributes 0 now.
-  int32_t base_force_mN = 0;
+  // Commanded force = boost_human (Step 3 Part C), computed fresh each cycle from
+  // the handle voltage. Until a session runs CMD_CALIBRATE_HANDLE the boost is
+  // forced to 0, so this is a transparent (base-0) shaft exactly as before.
+  // The Task 0 phase will add the velocity-gated boost_stiction term on top.
 
   send_ack(CMD_ENTER_COR);
 
@@ -975,8 +1100,19 @@ void cor_loop() {
   while (running) {
     loop_timer = 0;
 
-    // --- 1. Motor exchange: stream base force, read kinematics ---
-    MotorExchange ex = motor_exchange(base_force_mN);
+    // --- 0. Handle boost: read voltage, map to a signed assist force, clip ---
+    // boost_human is independent of the motor exchange (just an ADC read), so it
+    // is computed before streaming. Added before the safety clip per C.4; in the
+    // Task 1 phase "the boost" is just boost_human (no stiction term yet).
+    float v_handle   = read_handle_voltage();
+    float boost_mN   = boost_human_mN(v_handle);
+    double cmd_mN    = (double)boost_mN;
+    if (cmd_mN >  par_max_force_mN) cmd_mN =  par_max_force_mN;
+    if (cmd_mN < -par_max_force_mN) cmd_mN = -par_max_force_mN;
+    int32_t cmd_force_mN = (int32_t)cmd_mN;
+
+    // --- 1. Motor exchange: stream the boost force, read kinematics ---
+    MotorExchange ex = motor_exchange(cmd_force_mN);
     if (ex.errors != 0) {
       motor_sleep_safe();
       send_error_with_fault(ERR_MOTOR_FAULT, ex.errors);
@@ -991,13 +1127,15 @@ void cor_loop() {
 
     // --- 3. Record reduced telemetry ---
     SampleCOR s;
-    s.cycle        = loop_cycle;
-    s.t_meas_us    = ex.t_meas_us;
-    s.x            = (float)st_x;
-    s.xdot         = (float)st_xdot;
-    s.xddot        = (float)st_xddot;
-    s.f_command_mN = (float)base_force_mN;
-    s.loop_us      = prev_loop_us;
+    s.cycle          = loop_cycle;
+    s.t_meas_us      = ex.t_meas_us;
+    s.x              = (float)st_x;
+    s.xdot           = (float)st_xdot;
+    s.xddot          = (float)st_xddot;
+    s.f_command_mN   = (float)cmd_mN;
+    s.handle_voltage = v_handle;
+    s.boost_human_mN = boost_mN;
+    s.loop_us        = prev_loop_us;
     push_sample_cor(s);
 
     loop_cycle++;
@@ -1328,6 +1466,23 @@ void handle_command(const uint8_t* pkt, size_t len) {
     send_ack(CMD_EXIT_MODE);
     break;
 
+  case CMD_CALIBRATE_HANDLE: {
+    if (payload_len != PAYLOAD_CALIBRATE_HANDLE) { send_error(ERR_BADLEN); return; }
+    // 2 s resting-baseline capture (Step 3 C.0). Reply carries the measured band
+    // (two floats) on both success and failure so the Mac logs it per session.
+    float vmin, vmax;
+    if (calibrate_handle(&vmin, &vmax)) {
+      handle_baseline_min = vmin;
+      handle_baseline_max = vmax;
+      handle_calibrated   = true;
+      send_handle_cal_reply(REPLY_ACK, CMD_CALIBRATE_HANDLE, vmin, vmax);
+    } else {
+      handle_calibrated = false;  // boost stays 0 until a good baseline is captured
+      send_handle_cal_reply(REPLY_ERROR, ERR_HANDLE_CAL, vmin, vmax);
+    }
+    break;
+  }
+
   default:
     send_error(ERR_BADOP);
     break;
@@ -1348,6 +1503,11 @@ void setup() {
   }
   Udp.begin(LOCAL_PORT);
   Serial1.begin(DEFAULT_BAUD, SERIAL_8E1);
+
+  // Force-sensing handle ADC (Step 3 Part C): 12-bit, no hardware averaging
+  // (matches wheatstone.ino — the boost deadband + ramp do the smoothing).
+  analogReadResolution(12);
+  analogReadAveraging(1);
 
   Serial.print("Listening on UDP ");
   Serial.print(Ethernet.localIP());
