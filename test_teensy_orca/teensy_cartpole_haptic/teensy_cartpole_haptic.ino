@@ -122,7 +122,7 @@ constexpr size_t PAYLOAD_SLEEP_CMD = 0;
 constexpr size_t PAYLOAD_ENTER_COR = 0;
 constexpr size_t PAYLOAD_MOVE_TO   = 16;  // 4 × float: setpoint_um, duration_s, loop_period_us, error_threshold_um
 constexpr size_t PAYLOAD_EXIT_MODE = 0;
-constexpr size_t PAYLOAD_CALIBRATE_HANDLE = 0;
+constexpr size_t PAYLOAD_CALIBRATE_HANDLE = 20;  // 5 × float boost params
 
 // =====================================================================
 // Physics parameters (set by CMD_CONFIG)
@@ -151,14 +151,17 @@ constexpr int   HANDLE_PIN   = A0;       // matches wheatstone.ino FORCE_PIN
 constexpr float ADC_VREF     = 3.3f;     // Teensy 4.1 analog reference (V)
 constexpr float ADC_FULLSCALE = 4095.0f; // 12-bit range 0..4095 (wheatstone.ino line 17)
 
-// boost_human shape (mN). BOOST_MIN at the ramp edge (±DV past the band),
-// asymptoting to BOOST_MAX at the rail. k, m are shape constants — bench-tunable
-// (see STICTION_BOOST_README "Open items"); start values per the README.
-constexpr float BOOST_MIN_MN = 12000.0f; // 12 N at the ramp edge
-constexpr float BOOST_MAX_MN = 15000.0f; // plateau toward this at the rail
-constexpr float BOOST_DV     = 0.20f;    // onset margin past the band (V)
-constexpr float BOOST_K      = 3.0f;     // exponential ramp shape
-constexpr float BOOST_M      = 4.0f;     // saturation curvature toward the rail
+// boost_human shape (mN). par_boost_min at the ramp edge (±DV past the band),
+// asymptoting to par_boost_max at the rail. These are bench-tunable
+// (STICTION_BOOST_README "Open items"): the Mac sends fresh values in the
+// CMD_CALIBRATE_HANDLE payload, so editing them in teensy_common.mwel and
+// recalibrating updates the feel without reflashing. Defaults per the README;
+// par_boost_dv / par_boost_k are floored on apply to avoid div-by-zero.
+float par_boost_min_mN = 12000.0f; // 12 N at the ramp edge
+float par_boost_max_mN = 15000.0f; // plateau toward this at the rail
+float par_boost_dv     = 0.20f;    // onset margin past the band (V)
+float par_boost_k      = 3.0f;     // exponential ramp shape
+float par_boost_m      = 4.0f;     // saturation curvature toward the rail
 
 // Calibration bounds (STICTION_BOOST_README C.0): reject an implausible baseline.
 constexpr float HANDLE_CAL_SECONDS   = 2.0f;
@@ -870,26 +873,26 @@ float boost_human_mN(float v) {
 
   if (v > b_hi) {
     // Rightward (push right → position increases): positive boost.
-    if (v <= b_hi + BOOST_DV) {
-      float u = (v - b_hi) / BOOST_DV;                       // 0..1
-      return BOOST_MIN_MN * (expf(BOOST_K * u) - 1.0f) / (expf(BOOST_K) - 1.0f);
+    if (v <= b_hi + par_boost_dv) {
+      float u = (v - b_hi) / par_boost_dv;                   // 0..1
+      return par_boost_min_mN * (expf(par_boost_k * u) - 1.0f) / (expf(par_boost_k) - 1.0f);
     }
-    float denom = ADC_VREF - (b_hi + BOOST_DV);
-    float w = (denom > 1e-6f) ? (v - (b_hi + BOOST_DV)) / denom : 1.0f;
+    float denom = ADC_VREF - (b_hi + par_boost_dv);
+    float w = (denom > 1e-6f) ? (v - (b_hi + par_boost_dv)) / denom : 1.0f;
     if (w > 1.0f) w = 1.0f;
-    float f = BOOST_MAX_MN - (BOOST_MAX_MN - BOOST_MIN_MN) * expf(-BOOST_M * w);
-    return (f > BOOST_MAX_MN) ? BOOST_MAX_MN : f;
+    float f = par_boost_max_mN - (par_boost_max_mN - par_boost_min_mN) * expf(-par_boost_m * w);
+    return (f > par_boost_max_mN) ? par_boost_max_mN : f;
   } else {
     // Leftward (push left → position decreases): mirror image, negative boost.
-    if (v >= b_lo - BOOST_DV) {
-      float u = (b_lo - v) / BOOST_DV;                       // 0..1
-      return -BOOST_MIN_MN * (expf(BOOST_K * u) - 1.0f) / (expf(BOOST_K) - 1.0f);
+    if (v >= b_lo - par_boost_dv) {
+      float u = (b_lo - v) / par_boost_dv;                   // 0..1
+      return -par_boost_min_mN * (expf(par_boost_k * u) - 1.0f) / (expf(par_boost_k) - 1.0f);
     }
-    float denom = b_lo - BOOST_DV;                           // band edge → 0 V rail
-    float w = (denom > 1e-6f) ? ((b_lo - BOOST_DV) - v) / denom : 1.0f;
+    float denom = b_lo - par_boost_dv;                       // band edge → 0 V rail
+    float w = (denom > 1e-6f) ? ((b_lo - par_boost_dv) - v) / denom : 1.0f;
     if (w > 1.0f) w = 1.0f;
-    float f = BOOST_MAX_MN - (BOOST_MAX_MN - BOOST_MIN_MN) * expf(-BOOST_M * w);
-    return -((f > BOOST_MAX_MN) ? BOOST_MAX_MN : f);
+    float f = par_boost_max_mN - (par_boost_max_mN - par_boost_min_mN) * expf(-par_boost_m * w);
+    return -((f > par_boost_max_mN) ? par_boost_max_mN : f);
   }
 }
 
@@ -1468,6 +1471,17 @@ void handle_command(const uint8_t* pkt, size_t len) {
 
   case CMD_CALIBRATE_HANDLE: {
     if (payload_len != PAYLOAD_CALIBRATE_HANDLE) { send_error(ERR_BADLEN); return; }
+    // Adopt the boost shape params shipped with this calibration (so a tweak in
+    // teensy_common.mwel takes effect on the next recalibration, never mid-run).
+    float bvals[5];
+    memcpy(bvals, payload, 20);  // boost_min_mN, boost_max_mN, boost_dv, boost_k, boost_m
+    par_boost_min_mN = bvals[0];
+    par_boost_max_mN = bvals[1];
+    par_boost_dv     = bvals[2];
+    par_boost_k      = bvals[3];
+    par_boost_m      = bvals[4];
+    if (par_boost_dv < 1e-3f) par_boost_dv = 1e-3f;  // floor: avoid div-by-zero
+    if (par_boost_k  < 1e-3f) par_boost_k  = 1e-3f;  // floor: ramp denom expf(k)-1
     // 2 s resting-baseline capture (Step 3 C.0). Reply carries the measured band
     // (two floats) on both success and failure so the Mac logs it per session.
     float vmin, vmax;
