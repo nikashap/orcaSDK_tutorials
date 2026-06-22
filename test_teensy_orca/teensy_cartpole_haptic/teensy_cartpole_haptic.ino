@@ -42,7 +42,7 @@ uint16_t  macPort = 0;
 // =====================================================================
 constexpr uint8_t  MOTOR_ADDR            = 0x01;
 constexpr uint32_t DEFAULT_BAUD          = 1000000; //must match motor's settings
-constexpr uint32_t DEFAULT_INTERFRAME_US = 100; //must match motor's settings
+constexpr uint32_t DEFAULT_INTERFRAME_US = 20; //must match motor's settings
 constexpr uint32_t USER_COMMS_TIMEOUT_US = 500000; //500 milliseconds
 
 constexpr uint8_t FC_READ_HOLDING        = 0x03;
