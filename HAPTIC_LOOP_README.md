@@ -95,7 +95,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 | `0x06` | `CMD_END` | none | 0 | Exit the loop, sleep the motor (see below). |
 | `0x07` | `CMD_SLEEP` | none | 0 | Immediate motor-sleep + idle, valid any time. |
 
-Opcodes `0x00` and `0x08`–`0xFF` are reserved; receiving one yields `ERR_BADOP`.
+Opcodes `0x01`–`0x07` are the Step 4 haptic protocol documented here. `0x08`–`0x0B` were added later for Tasks 1/2 (`CMD_ENTER_COR`, `CMD_MOVE_TO`, `CMD_EXIT_MODE`) and the Step 3 force-handle boost (`CMD_CALIBRATE_HANDLE`) — see `TASK_OUTLINE.md` and the boost-params section below. `0x00` and `0x0C`–`0xFF` remain reserved; receiving a reserved opcode yields `ERR_BADOP`.
 
 Payload byte offsets for reference (all little-endian):
 - `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24.
@@ -143,6 +143,26 @@ Document the struct layout in a comment so the Python side can `struct.unpack` i
 | `0x05` | `ERR_NAN_STATE` | A physics state went non-finite. |
 | `0x06` | `ERR_MODBUS_TIMEOUT` | Motor exchange timed out. |
 | `0x07` | `ERR_NOT_CONFIGURED` | `CMD_BEGIN` received before a valid `CMD_CONFIG`. |
+| `0x08` | `ERR_MOVE_FAILED` | `CMD_MOVE_TO` (Tasks 1/2) ended outside threshold or faulted; reply carries the final position (`int32` µm). |
+| `0x09` | `ERR_HANDLE_CAL` | `CMD_CALIBRATE_HANDLE` measured an implausible handle baseline; reply carries the measured `[min,max]` band (2 × `float`). |
+
+## Force-handle boost parameters (`boost_human`, Step 3 Part C)
+
+The force-sensing handle adds an operator-driven assist force, `boost_human`, mapped from the handle ADC voltage on `A0` (12-bit, `v = raw * 3.3/4095`). It is currently wired into the fully-actuated COR loop (Tasks 1/2), added to the commanded force **before** the `max_force_mN` safety clip. Authoritative spec: `STICTION_BOOST_README.md` (C.0–C.2). The velocity-gated `boost_stiction` term and the Task 0 combination are a later round.
+
+**Calibration + params are coupled.** `CMD_CALIBRATE_HANDLE` (`0x0B`) does two things in one shot: it samples the resting handle for 2 s to capture a fresh `[baseline_min, baseline_max]` voltage band, and it adopts the five `boost_human` shape params carried in its payload. So editing a param and recalibrating updates the feel **without reflashing**, and the update only ever lands at calibration time (never mid-trial). Until a session calibrates successfully, `boost_human` is forced to 0 and the COR loop is a transparent base-0 shaft. A bad baseline (band > 0.4 V, or pinned below 0.5 V / above 3.0 V) → `ERR_HANDLE_CAL` and the boost stays disabled.
+
+The mapping per side: zero inside the `[baseline_min, baseline_max]` deadband; an exponential ramp `0 → ±boost_min_mN` over `boost_dv` volts past the band edge; then an asymptotic plateau toward `±boost_max_mN` at the rail (3.3 V right / 0 V left). Continuous, monotonic, sign = push direction, **not** velocity-gated.
+
+| Param (`CMD_CALIBRATE_HANDLE` payload, in order) | MWorks var | Default | Units | Meaning |
+|---|---|---|---|---|
+| `boost_min_mN` | `boost_min_mN` | 12000 | mN | Assist magnitude at the ramp edge (`boost_dv` past the band). |
+| `boost_max_mN` | `boost_max_mN` | 15000 | mN | Assist magnitude plateau approached at the rail. |
+| `boost_dv` | `boost_dv` | 0.20 | V | Onset margin past the resting band over which the ramp rises. Floored at `1e-3`. |
+| `boost_k` | `boost_k` | 3.0 | — | Exponential ramp shape (onset steepness). Floored at `1e-3`. |
+| `boost_m` | `boost_m` | 4.0 | — | Saturation curvature toward the rail plateau. |
+
+Payload is `5 × float` little-endian (`boost_min_mN`@0, `boost_max_mN`@4, `boost_dv`@8, `boost_k`@12, `boost_m`@16). The MWorks vars live in `common/teensy_common.mwel` (`Force Handle` group); `task1.py setup()` reads them and passes them to `TeensyInterface.calibrate_handle()`. The reply (`ACK 0x0B` on success, `ERROR 0x09` on reject) carries the measured `[min, max]` band as `2 × float` for per-session logging (`handle_baseline_min/max`, `handle_cal_ok`). The handle voltage and the pre-clip boost are streamed per cycle in `SampleCOR` (`handle_voltage`, `boost_human_mN`; see `TASK_OUTLINE.md`) and logged to CSV for bench tuning.
 
 ## CMD_BEGIN — entry to the haptic loop
 

@@ -42,7 +42,8 @@ If you find yourself implementing Task 3 or 4 Teensy modes, stop — they are ou
     `CMD_EXIT_MODE=0x0A`; `ERR_MOVE_FAILED=0x08`; `SampleCOR` (28 B) under
     `TELE_BATCH_COR=0xB2`; `cor_loop()` (force base 0, no RK4) and `do_move_to()`
     (quintic min-jerk via `SUB_POSITION_CTRL=0x1E`). Haptic `0x01`–`0x07` path
-    untouched; `0x0B`–`0x0F` reserved.
+    untouched. (`SampleCOR` later extended to 36 B and `0x0B` allocated by Step 3
+    Part C below — see that entry.)
   - `interfaces/teensy_interface.py`: `SampleCOR`, `0xB2` handler (drives
     `rendered_cart_x` only — pendulum angle owned by MWorks), `configure()`,
     `move_to()`, `enter_cor()`, `exit_cor()`; `ERR_MOVE_FAILED` treated as a
@@ -59,6 +60,26 @@ If you find yourself implementing Task 3 or 4 Teensy modes, stop — they are ou
   - **Unverified assumption (flag):** `SUB_POSITION_CTRL=0x1E` driving position mode
     is inferred from the SDK register map (`POS_CMD=30`), not yet bench-confirmed —
     the most likely failure point.
+
+- **Step 3 Part C — `boost_human` in Task 1 (handle force-boost).** Spec:
+  `STICTION_BOOST_README.md` (C.0–C.2, C.4). `boost_stiction` + the Task 0 combination
+  and the standalone Parts A/B sketches are a later round.
+  - Teensy `teensy_cartpole_haptic.ino`: `CMD_CALIBRATE_HANDLE=0x0B` (payload 5 × `float`
+    boost shape params), `ERR_HANDLE_CAL=0x09`; reserved range narrowed to `0x0C`–`0x0F`.
+    `read_handle_voltage()` (A0, 12-bit, `v=raw*3.3/4095`), `boost_human_mN()` (deadband
+    → exp ramp → rail plateau, not velocity-gated, 0 until calibrated), `calibrate_handle()`
+    (2 s baseline + validity gate). Boost added in the shared `cor_loop()` before the
+    safety clip; gated on `handle_calibrated` so an uncalibrated session is base-0 as before.
+    The 5 shape params (`par_boost_*`) are session-overridable via the calibration payload.
+    `SampleCOR` extended 28→36 B (`+handle_voltage, +boost_human_mN`, `<II6fI`).
+  - `interfaces/teensy_interface.py`: `CMD_CALIBRATE_HANDLE`/`ERR_HANDLE_CAL`, 36-B
+    `SampleCOR` parse + CSV log, `calibrate_handle(boost_*)` (non-fatal rendezvous like
+    `move_to`). `interfaces/data_logger.py`: `+handle_voltage, +boost_human_mN` columns.
+  - MWorks: `common/teensy_common.mwel` `Force Handle` group (`handle_baseline_min/max`,
+    `handle_cal_ok`, `boost_min_mN/boost_max_mN/boost_dv/boost_k/boost_m`); `task1.py`
+    `setup()` calibrates after `configure()`, logs the band + outcome, non-fatal on reject.
+  - **Pending bench verification:** handle hardware not yet wired; uncalibrated path
+    (boost 0) is the safe default until confirmed.
 
 ## Step 0 (do this first): Conform to the existing modular layout
 
@@ -112,11 +133,12 @@ The existing opcode table (`HAPTIC_LOOP_README.md`) uses `0x01`–`0x07`. Add ne
 
 | Opcode | Name | Payload | Meaning |
 |---|---|---|---|
-| `0x08` | `CMD_ENTER_COR` | none | Enter center-out-reach mode (force mode, base force 0, no physics). Used by Tasks 1 and 2. |
+| `0x08` | `CMD_ENTER_COR` | none | Enter center-out-reach mode (force mode, base force 0 + `boost_human` once calibrated, no physics). Used by Tasks 1 and 2. |
 | `0x09` | `CMD_MOVE_TO` | 4 × `float` = `setpoint_um, duration_s, loop_period_us, error_threshold_um` | Position-mode move to a setpoint along a generated trajectory. |
 | `0x0A` | `CMD_EXIT_MODE` | none | Leave COR or MOVE_TO, return motor to idle/sleep, ready for the next mode. |
+| `0x0B` | `CMD_CALIBRATE_HANDLE` | 5 × `float` = `boost_min_mN, boost_max_mN, boost_dv, boost_k, boost_m` | Capture the force-handle resting baseline (2 s) and adopt the `boost_human` shape params shipped in the payload. Reply `ACK 0x0B` (or `ERROR 0x09`) carries the measured `[min, max]` voltage band as 2 × `float`. Cross-task (Step 3 Part C); see `STICTION_BOOST_README.md`. |
 
-Reserve `0x0B`–`0x0F` for future task modes (Tasks 3, 4). Receiving a reserved opcode → `ERR_BADOP`.
+Reserve `0x0C`–`0x0F` for future task modes (Tasks 3, 4). Receiving a reserved opcode → `ERR_BADOP`.
 
 ### `COR` mode behavior
 
@@ -124,28 +146,30 @@ When `CMD_ENTER_COR` is received:
 
 1. Set motor to **force mode**.
 2. Internally command a **base force of 0**.
-3. *(Deferred — do not implement now)* Add an FSR-driven friction boost to the base command, gated by `stiction_velocity_threshold` and scaled by `friction_boost_gain`. Leave a clearly-marked hook where this term will be added, currently contributing 0.
+3. Add `boost_human` (handle-driven assist force) to the base command before the safety clip — implemented in Step 3 Part C (`CMD_CALIBRATE_HANDLE`); contributes 0 until a session calibrates the handle. The velocity-gated `boost_stiction` term (gated by `stiction_velocity_threshold`, scaled by `friction_boost_gain`) is still deferred to the Task 0 phase — see `STICTION_BOOST_README.md` C.3/C.5.
 4. Keep running the **same motor exchange as the haptic loop** — command-stream run, acceleration read, velocity read, with timestamps — but **skip the RK4 physics step** entirely. There are no pendulum dynamics in this mode.
 5. Stream a **reduced telemetry record** (below).
 
 ### Reduced `Sample` struct for COR (`SampleCOR`)
 
-The COR telemetry is the haptic `Sample` with the pendulum-only fields removed (`theta`, `thetadot`, `fx`, `fpc`). Use a distinct telemetry discriminator byte so the Mac can tell the two record types apart.
+The COR telemetry is the haptic `Sample` with the pendulum-only fields removed (`theta`, `thetadot`, `fx`, `fpc`), plus the force-handle boost fields appended (Step 3 Part C) so `boost_human` can be verified on the bench. Use a distinct telemetry discriminator byte so the Mac can tell the two record types apart.
 
 ```
 // Telemetry discriminator bytes:
 //   0xB0 = full haptic Sample      (Task 0)
-//   0xB2 = reduced COR sample      (Tasks 1, 2)   <-- new
-struct __attribute__((packed)) SampleCOR {
+//   0xB2 = reduced COR sample      (Tasks 1, 2)
+struct __attribute__((packed)) SampleCOR {     // 36 bytes (was 28 before Step 3)
   uint32_t cycle;
   uint32_t t_meas_us;     // micros() at moment xddot was measured
   float    x, xdot, xddot;// measured shaft state (SI)
-  float    f_command_mN;  // commanded force (base 0 + future friction boost)
+  float    f_command_mN;  // commanded force after boost + safety clip
+  float    handle_voltage;// raw handle ADC voltage this cycle (V)        <-- Step 3
+  float    boost_human_mN;// boost_human before the safety clip (signed mN) <-- Step 3
   uint32_t loop_us;
 };
 ```
 
-Batch ~8 per packet exactly as the haptic stream does: leading `0xB2`, then `uint8` count, then that many `SampleCOR` records.
+Batch ~8 per packet exactly as the haptic stream does: leading `0xB2`, then `uint8` count, then that many `SampleCOR` records. Python format `<II6fI` (36 B); both fields are 0 until a successful `CMD_CALIBRATE_HANDLE` enables the boost.
 
 ### `MOVE_TO` mode behavior
 
@@ -163,7 +187,8 @@ When `CMD_MOVE_TO` is received with `(setpoint_um, duration_s, loop_period_us, e
 
 | Code | Name | Meaning |
 |---|---|---|
-| (next free) | `ERR_MOVE_FAILED` | `MOVE_TO` ended outside the error threshold or faulted. |
+| `0x08` | `ERR_MOVE_FAILED` | `MOVE_TO` ended outside the error threshold or faulted. Reply carries the achieved final position (`int32` µm). |
+| `0x09` | `ERR_HANDLE_CAL` | `CMD_CALIBRATE_HANDLE` measured an implausible baseline (band > 0.4 V, or pinned below 0.5 V / above 3.0 V). Reply carries the measured `[min, max]` band (2 × `float`); boost stays disabled. |
 
 ## Task Specs
 

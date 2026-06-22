@@ -1,14 +1,18 @@
 /*
  * teensy_cartpole_haptic.ino
  *
- * Step 4: Integrated haptic cart-pole loop on Teensy 4.1.
- *
- * Merges the validated pendulum physics (Step 1) with the Orca Modbus
- * bridge (Step 2).  A human drives the motor shaft ("cart"); the Teensy
+ * Integrated haptic cart-pole loop on Teensy 4.1.
+ * 
+ * Implements two main task variants of an MWorks cart-pendulum experiment:
+ * 1) A human drives the motor shaft ("cart"); the Teensy
  * reads shaft kinematics, integrates the virtual pendulum via RK4,
  * and commands the motor to render the pendulum reaction force.
+ * 
+ * 2) A human drives the motor shaft to a particular position (center-out-reach).
+ * There are no pendulum dynamics in this task variant
  *
- * Mac sends binary UDP commands (see HAPTIC_LOOP_README.md).
+ * Mac sends binary UDP commands to the teensy (see TEENSY_API.md).
+ * Under valid codes, teensy executes commands to an Orca motor over Modbus RTU.
  * Teensy streams packed binary telemetry back.
  *
  * Hardware: Teensy 4.1 + Ethernet kit (QNEthernet),
@@ -34,11 +38,11 @@ IPAddress macIP;
 uint16_t  macPort = 0;
 
 // =====================================================================
-// Modbus configuration (from teensy_orca_bridge)
+// Modbus configuration
 // =====================================================================
 constexpr uint8_t  MOTOR_ADDR            = 0x01;
-constexpr uint32_t DEFAULT_BAUD          = 1000000;
-constexpr uint32_t DEFAULT_INTERFRAME_US = 100;
+constexpr uint32_t DEFAULT_BAUD          = 1000000; //must match motor's settings
+constexpr uint32_t DEFAULT_INTERFRAME_US = 100; //must match motor's settings
 constexpr uint32_t USER_COMMS_TIMEOUT_US = 500000; //500 milliseconds
 
 constexpr uint8_t FC_READ_HOLDING        = 0x03;
@@ -55,6 +59,7 @@ constexpr uint8_t SUB_POSITION_CTRL      = 0x1E;  // POS_CMD   register 30 (0x1E
 // for up to this long so the motor's internal position PID can close any
 // remaining following error before we judge success. Exits early once within
 // the error threshold; failure is reported only if still outside it after this.
+// may need to tune the Position Controller fo the motor
 constexpr uint32_t MOVE_SETTLE_US        = 500000;  // 0.5 s settle buffer
 
 constexpr uint16_t REG_SHAFT_SPEED       = 344;
@@ -66,7 +71,7 @@ constexpr uint16_t REG_ZERO_MODE            = 171;
 constexpr uint16_t REG_AUTO_ZERO_FORCE_N    = 172;
 constexpr uint16_t REG_AUTO_ZERO_SPEED_MMPS = 177;
 constexpr uint16_t REG_AUTO_ZERO_EXIT_MODE  = 173;
-constexpr uint16_t REG_CTRL_REG_3           = 3;    // write desired mode here
+constexpr uint16_t REG_CTRL_REG_3           = 3;
 constexpr uint16_t REG_MODE_OF_OPERATION    = 317;  // read-only: confirms current mode
 constexpr uint16_t REG_ERROR_0              = 432;
 
@@ -78,18 +83,15 @@ constexpr uint16_t MOTOR_MODE_AUTO_ZERO     = 55;
 // Binary protocol — opcodes (Mac → Teensy)
 // =====================================================================
 constexpr uint8_t CMD_PING     = 0x01;
-constexpr uint8_t CMD_AUTOZERO = 0x02;
-constexpr uint8_t CMD_CONFIG   = 0x03;
+constexpr uint8_t CMD_AUTOZERO = 0x02; // entero autozero of motor
+constexpr uint8_t CMD_CONFIG   = 0x03; // configure parameters of cart-pendulum system
 constexpr uint8_t CMD_INIT     = 0x04;
 constexpr uint8_t CMD_BEGIN    = 0x05;
 constexpr uint8_t CMD_END      = 0x06;
 constexpr uint8_t CMD_SLEEP    = 0x07;
-// Task 1/2 (Step 7) fully-actuated modes. The 0x01–0x07 haptic path is untouched.
 constexpr uint8_t CMD_ENTER_COR = 0x08;  // enter center-out-reach mode (force, base 0, no physics)
 constexpr uint8_t CMD_MOVE_TO   = 0x09;  // quintic position move to a setpoint
 constexpr uint8_t CMD_EXIT_MODE = 0x0A;  // leave COR/MOVE_TO, return to idle
-// Handle force-boost (Step 3 Part C). Cross-task; the Mac sends it once at
-// session bring-up (before any loop) to capture the resting handle baseline.
 constexpr uint8_t CMD_CALIBRATE_HANDLE = 0x0B;  // 2 s handle baseline capture
 // 0x0C–0x0F reserved for Tasks 3/4 → ERR_BADOP.
 
@@ -137,10 +139,10 @@ uint32_t par_loop_us    = 1800;
 bool configured = false;
 
 // =====================================================================
-// Force-sensing handle — boost_human (Step 3 Part C, STICTION_BOOST_README)
+// Force-sensing handle — boost_human
 //
-// The handle is an AD620-amplified Wheatstone bridge read on A0 (FORCE_PIN in
-// wheatstone.ino). Its resting voltage drifts session-to-session, so we capture
+// The handle is an AD620-amplified Wheatstone bridge read on A0
+// Its resting voltage drifts session-to-session, so we capture
 // a fresh [baseline_min, baseline_max] band with CMD_CALIBRATE_HANDLE before any
 // loop runs. boost_human_mN() maps voltage outside that band to a signed assist
 // force; inside the band it is exactly 0. Not velocity-gated. Until a successful
@@ -149,13 +151,12 @@ bool configured = false;
 // =====================================================================
 constexpr int   HANDLE_PIN   = A0;       // matches wheatstone.ino FORCE_PIN
 constexpr float ADC_VREF     = 3.3f;     // Teensy 4.1 analog reference (V)
-constexpr float ADC_FULLSCALE = 4095.0f; // 12-bit range 0..4095 (wheatstone.ino line 17)
+constexpr float ADC_FULLSCALE = 4095.0f; // 12-bit range 0..4095
 
 // boost_human shape (mN). par_boost_min at the ramp edge (±DV past the band),
 // asymptoting to par_boost_max at the rail. These are bench-tunable
-// (STICTION_BOOST_README "Open items"): the Mac sends fresh values in the
-// CMD_CALIBRATE_HANDLE payload, so editing them in teensy_common.mwel and
-// recalibrating updates the feel without reflashing. Defaults per the README;
+// the Mac sends fresh values in the CMD_CALIBRATE_HANDLE payload,
+// so editing them in teensy_common.mwel and recalibrating updates the feel without reflashing.
 // par_boost_dv / par_boost_k are floored on apply to avoid div-by-zero.
 float par_boost_min_mN = 12000.0f; // 12 N at the ramp edge
 float par_boost_max_mN = 15000.0f; // plateau toward this at the rail
@@ -163,10 +164,10 @@ float par_boost_dv     = 0.20f;    // onset margin past the band (V)
 float par_boost_k      = 3.0f;     // exponential ramp shape
 float par_boost_m      = 4.0f;     // saturation curvature toward the rail
 
-// Calibration bounds (STICTION_BOOST_README C.0): reject an implausible baseline.
+// Calibration bounds: reject an implausible baseline.
 constexpr float HANDLE_CAL_SECONDS   = 2.0f;
 constexpr float HANDLE_CAL_MAX_BAND  = 0.40f;  // resting band wider than this → reject
-constexpr float HANDLE_CAL_RAIL_LO   = 0.50f;  // min below this → pinned low → reject
+constexpr float HANDLE_CAL_RAIL_LO   = 0.30f;  // min below this → pinned low → reject
 constexpr float HANDLE_CAL_RAIL_HI   = 3.00f;  // max above this → pinned high → reject
 
 float handle_baseline_min = 0.0f;
@@ -201,8 +202,15 @@ bool   state_initialized = false;
 // =====================================================================
 // Telemetry sample (packed binary, little-endian)
 //
-// Python struct format: '<II9fI'
-// Total: 4+4 + 9*4 + 4 = 48 bytes
+// The five force-boost fields are appended after the
+// haptic fields and before loop_us. In the boost_human-in-Task-0 phase only
+// handle_voltage / boost_human_mN / boost_combined_mN carry signal;
+// boost_stiction_mN and stiction_gate are reserved (held 0) for the later
+// boost_stiction phase, so the wire format is its final shape now and the Mac
+// parser never has to break again when stiction lands.
+//
+// Python struct format: '<II14fI'
+// Total: 4+4 + 14*4 + 4 = 68 bytes
 // =====================================================================
 struct __attribute__((packed)) Sample {
   uint32_t cycle;
@@ -212,10 +220,15 @@ struct __attribute__((packed)) Sample {
   float    fx;
   float    fpc;
   float    f_command_mN;
-  float    force_sensed_mN;  // motor_tele.force_mn (lags ~3 frames)
+  float    force_sensed_mN;   // motor_tele.force_mn (lags ~3 frames)
+  float    handle_voltage;    // raw handle ADC voltage this cycle (V)
+  float    boost_human_mN;    // boost_human before clip (signed mN)
+  float    boost_stiction_mN; // 0 until the Task 0 boost_stiction phase
+  float    stiction_gate;     // velocity gate 0..1 (0 until stiction phase)
+  float    boost_combined_mN; // total boost added before clip (== boost_human now)
   uint32_t loop_us;
 };
-static_assert(sizeof(Sample) == 48, "Sample struct packing");
+static_assert(sizeof(Sample) == 68, "Sample struct packing");
 
 constexpr int MAX_SAMPLES_PER_PACKET = 8;
 Sample   tele_buf[MAX_SAMPLES_PER_PACKET];
@@ -224,7 +237,7 @@ uint8_t  tele_count = 0;
 // =====================================================================
 // Reduced telemetry for COR mode (Tasks 1, 2) — the haptic Sample with
 // the pendulum-only fields (theta, thetadot, fx, fpc, force_sensed_mN)
-// removed, plus the handle force-boost fields (Step 3 Part C) appended so the
+// removed, plus the handle force-boost fields appended so the
 // boost_human mapping can be verified on the bench. Distinct discriminator byte
 // (TELE_BATCH_COR = 0xB2).
 //
@@ -289,7 +302,7 @@ bool     motor_connected  = false;
 uint32_t current_interframe_us = DEFAULT_INTERFRAME_US;
 
 // =====================================================================
-// CRC-16 Modbus (from teensy_orca_bridge)
+// CRC-16 Modbus
 // =====================================================================
 uint16_t modbus_crc(const uint8_t* buf, size_t len) {
   uint16_t crc = 0xFFFF;
@@ -318,7 +331,7 @@ bool check_crc(const uint8_t* buf, size_t len) {
 }
 
 // =====================================================================
-// Serial / Modbus I/O (from teensy_orca_bridge)
+// Serial / Modbus I/O
 // =====================================================================
 void interframe_delay() {
   delayMicroseconds(current_interframe_us);
@@ -349,7 +362,7 @@ int modbus_transact(const uint8_t* tx, size_t tx_len,
 }
 
 // =====================================================================
-// Modbus frame builders (from teensy_orca_bridge)
+// Modbus frame builders
 // =====================================================================
 size_t build_write_single(uint8_t* buf, uint16_t addr, uint16_t value) {
   buf[0] = MOTOR_ADDR;
@@ -430,7 +443,7 @@ bool parse_motor_stream_response(const uint8_t* buf, size_t len) {
 }
 
 // =====================================================================
-// Motor verification (from teensy_orca_bridge)
+// Motor verification
 // =====================================================================
 bool verify_motor_present() {
   uint8_t tx[8];
@@ -565,7 +578,7 @@ void motor_sleep_safe() {
 }
 
 // =====================================================================
-// Motor connect (from teensy_orca_bridge)
+// Motor connect
 // =====================================================================
 bool motor_connect(uint32_t baud, uint16_t delay_us) {
   Serial1.end();
@@ -851,14 +864,13 @@ MotorExchange motor_exchange(int32_t force_mN) {
 // Force-sensing handle: read, boost mapping, calibration (Step 3 Part C)
 // =====================================================================
 
-// C.1 — one ADC read per control cycle. 12-bit range 0..4095 (the stale
-// "0-8191" comment in wheatstone.ino is wrong; its own math uses 4095).
+// One ADC read per control cycle. 12-bit range 0..4095
 float read_handle_voltage() {
   int raw = analogRead(HANDLE_PIN);
   return (float)raw * (ADC_VREF / ADC_FULLSCALE);
 }
 
-// C.2 — boost_human: handle voltage → signed assist force (mN). Zero inside the
+// boost_human: handle voltage → signed assist force (mN). Zero inside the
 // measured deadband; exponential ramp 0→±BOOST_MIN over DV past the band edge;
 // then asymptotic plateau toward ±BOOST_MAX at the rail (3.3 V right / 0 V left).
 // Continuous, monotonic, sign = push direction. Depends ONLY on voltage (not
@@ -896,7 +908,7 @@ float boost_human_mN(float v) {
   }
 }
 
-// C.0 — sample the resting handle for HANDLE_CAL_SECONDS, returning the measured
+// Sample the resting handle for HANDLE_CAL_SECONDS, returning the measured
 // min/max voltage. Result valid only if the band is narrow and off the rails.
 bool calibrate_handle(float* out_min, float* out_max) {
   float vmin = 1e9f, vmax = -1e9f;
@@ -990,8 +1002,18 @@ void haptic_loop() {
     double f_cmd = compute_force(st_theta, st_thetadot, st_xddot,
                                  &thetaddot, &fx, &fpc);
 
-    // --- 7. Convert to mN and clip ---
+    // --- 7. Convert to mN, add the handle boost, then clip ---
+    // boost_human is just an ADC read mapped to a signed assist force; it is added
+    // before the safety clip (C.4). boost_stiction is NOT wired in this phase
+    // (held 0), so the combined boost is boost_human alone. Until a session runs
+    // CMD_CALIBRATE_HANDLE the boost is 0 and Task 0 behaves exactly as before.
     double f_cmd_mN = f_cmd * 1000.0;
+    float  v_handle       = read_handle_voltage();
+    float  boost_h_mN     = boost_human_mN(v_handle);
+    float  boost_stict_mN = 0.0f;                      // boost_stiction phase: not yet
+    float  stiction_gate  = 0.0f;
+    float  boost_comb_mN  = boost_h_mN + boost_stict_mN;
+    f_cmd_mN += (double)boost_comb_mN;
     if (f_cmd_mN >  par_max_force_mN) f_cmd_mN =  par_max_force_mN;
     if (f_cmd_mN < -par_max_force_mN) f_cmd_mN = -par_max_force_mN;
     prev_force_mN = (int32_t)f_cmd_mN;
@@ -1020,6 +1042,11 @@ void haptic_loop() {
     s.fpc          = (float)fpc;
     s.f_command_mN    = (float)f_cmd_mN;
     s.force_sensed_mN = (float)motor_tele.force_mn;
+    s.handle_voltage    = v_handle;
+    s.boost_human_mN    = boost_h_mN;
+    s.boost_stiction_mN = boost_stict_mN;
+    s.stiction_gate     = stiction_gate;
+    s.boost_combined_mN = boost_comb_mN;
     s.loop_us         = prev_loop_us;  // previous iteration's duration (incl. step 11)
     push_sample(s);
     last_sample = s;
@@ -1088,7 +1115,7 @@ void cor_loop() {
   prev_speed_mmps  = 0;
   prev_accel_mmpss = 0;
 
-  // Commanded force = boost_human (Step 3 Part C), computed fresh each cycle from
+  // Commanded force = boost_human, computed fresh each cycle from
   // the handle voltage. Until a session runs CMD_CALIBRATE_HANDLE the boost is
   // forced to 0, so this is a transparent (base-0) shaft exactly as before.
   // The Task 0 phase will add the velocity-gated boost_stiction term on top.
@@ -1105,7 +1132,7 @@ void cor_loop() {
 
     // --- 0. Handle boost: read voltage, map to a signed assist force, clip ---
     // boost_human is independent of the motor exchange (just an ADC read), so it
-    // is computed before streaming. Added before the safety clip per C.4; in the
+    // is computed before streaming. Added before the safety clip; in the
     // Task 1 phase "the boost" is just boost_human (no stiction term yet).
     float v_handle   = read_handle_voltage();
     float boost_mN   = boost_human_mN(v_handle);
