@@ -419,3 +419,8 @@ models/
 
 # Results
 test_teensy_orca/results/
+
+# Other stuff
+.DS_Store
+.ipynb_checkpoints/
+
