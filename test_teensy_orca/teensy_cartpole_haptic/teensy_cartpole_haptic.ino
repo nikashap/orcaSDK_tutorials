@@ -112,6 +112,7 @@ constexpr uint8_t ERR_MODBUS_TIMEOUT  = 0x06;
 constexpr uint8_t ERR_NOT_CONFIGURED  = 0x07;
 constexpr uint8_t ERR_MOVE_FAILED     = 0x08;  // MOVE_TO ended outside threshold or faulted
 constexpr uint8_t ERR_HANDLE_CAL      = 0x09;  // handle baseline implausible (wide band / rail-pinned)
+constexpr uint8_t ERR_ANGLE_LIMIT     = 0x0A;  // pendulum exceeded the safety angle (runaway swing) — loop aborted
 
 // Expected payload sizes per opcode
 constexpr size_t PAYLOAD_PING      = 0;
@@ -137,6 +138,12 @@ double par_g            = 9.81;
 double par_max_force_mN = 0.0;
 uint32_t par_loop_us    = 1800;
 bool configured = false;
+
+// Safety abort (haptic loop only): if the pendulum swings past this angle from
+// hanging (theta=0 is straight down), the loop stops, sleeps the motor, and
+// reports ERR_ANGLE_LIMIT. 120 deg = horizontal (90) + 30, i.e. heading toward
+// inversion/runaway. Checked on the wrapped angle so a continuing spin also trips.
+constexpr double MAX_PENDULUM_ANGLE_RAD = 120.0 * M_PI / 180.0;  // 2.0944 rad
 
 // =====================================================================
 // Force-sensing handle — boost_human
@@ -173,6 +180,15 @@ constexpr float HANDLE_CAL_RAIL_HI   = 3.00f;  // max above this → pinned high
 float handle_baseline_min = 0.0f;
 float handle_baseline_max = 0.0f;
 bool  handle_calibrated   = false;
+
+// Handle voltage EMA: the raw ADC read is noisy and a rapid grip change can jump
+// the boost by tens of N in one cycle (bench-observed). A first-order EMA on the
+// voltage feeding boost_human_mN() removes that buzz. Calibration still samples
+// the RAW voltage (it must capture the true resting noise band). Re-seeded at the
+// start of each loop so there is no startup transient from 0.
+constexpr float HANDLE_EMA_ALPHA = 0.1f;   // ~15 Hz cutoff at a 1200 us loop
+float handle_v_filt      = 0.0f;
+bool  handle_v_filt_init = false;
 
 // A single corrupted/short RS-422 frame should NOT kill the whole run, and we
 // can't afford to retry
@@ -870,6 +886,20 @@ float read_handle_voltage() {
   return (float)raw * (ADC_VREF / ADC_FULLSCALE);
 }
 
+// EMA-smoothed handle voltage for the control loops. Seeds on the first call of a
+// run (handle_v_filt_init reset at loop entry) so there is no transient from 0.
+// This is what feeds boost_human_mN(); calibration uses the raw read instead.
+float read_handle_voltage_filtered() {
+  float v = read_handle_voltage();
+  if (!handle_v_filt_init) {
+    handle_v_filt = v;
+    handle_v_filt_init = true;
+  } else {
+    handle_v_filt += HANDLE_EMA_ALPHA * (v - handle_v_filt);
+  }
+  return handle_v_filt;
+}
+
 // boost_human: handle voltage → signed assist force (mN). Zero inside the
 // measured deadband; exponential ramp 0→±BOOST_MIN over DV past the band edge;
 // then asymptotic plateau toward ±BOOST_MAX at the rail (3.3 V right / 0 V left).
@@ -953,6 +983,7 @@ void haptic_loop() {
   prev_position_um = 0;
   prev_speed_mmps  = 0;
   prev_accel_mmpss = 0;
+  handle_v_filt_init = false;   // re-seed the handle EMA on the first cycle
   Sample last_sample = {};
 
   // --- Initial step: compute initial force before main loop ---
@@ -1008,7 +1039,7 @@ void haptic_loop() {
     // (held 0), so the combined boost is boost_human alone. Until a session runs
     // CMD_CALIBRATE_HANDLE the boost is 0 and Task 0 behaves exactly as before.
     double f_cmd_mN = f_cmd * 1000.0;
-    float  v_handle       = read_handle_voltage();
+    float  v_handle       = read_handle_voltage_filtered();   // EMA-smoothed
     float  boost_h_mN     = boost_human_mN(v_handle);
     float  boost_stict_mN = 0.0f;                      // boost_stiction phase: not yet
     float  stiction_gate  = 0.0f;
@@ -1052,6 +1083,17 @@ void haptic_loop() {
     last_sample = s;
 
     loop_cycle++;
+
+    // --- Safety: abort if the pendulum swings past the angle limit ---
+    // Wrap to (-pi, pi] so a continuing spin (theta growing past pi) also trips.
+    // The tripping sample is already logged above; sleep the motor and report.
+    double theta_wrapped = atan2(sin(st_theta), cos(st_theta));
+    if (fabs(theta_wrapped) > MAX_PENDULUM_ANGLE_RAD) {
+      motor_sleep_safe();
+      send_error(ERR_ANGLE_LIMIT);
+      flush_telemetry();
+      return;
+    }
 
     // --- 11. Check for UDP commands (non-blocking) ---
     int sz = Udp.parsePacket();
@@ -1114,6 +1156,7 @@ void cor_loop() {
   prev_position_um = 0;
   prev_speed_mmps  = 0;
   prev_accel_mmpss = 0;
+  handle_v_filt_init = false;   // re-seed the handle EMA on the first cycle
 
   // Commanded force = boost_human, computed fresh each cycle from
   // the handle voltage. Until a session runs CMD_CALIBRATE_HANDLE the boost is
@@ -1134,7 +1177,7 @@ void cor_loop() {
     // boost_human is independent of the motor exchange (just an ADC read), so it
     // is computed before streaming. Added before the safety clip; in the
     // Task 1 phase "the boost" is just boost_human (no stiction term yet).
-    float v_handle   = read_handle_voltage();
+    float v_handle   = read_handle_voltage_filtered();   // EMA-smoothed
     float boost_mN   = boost_human_mN(v_handle);
     double cmd_mN    = (double)boost_mN;
     if (cmd_mN >  par_max_force_mN) cmd_mN =  par_max_force_mN;
