@@ -85,13 +85,13 @@ constexpr uint16_t MOTOR_MODE_AUTO_ZERO     = 55;
 constexpr uint8_t CMD_PING     = 0x01;
 constexpr uint8_t CMD_AUTOZERO = 0x02; // entero autozero of motor
 constexpr uint8_t CMD_CONFIG   = 0x03; // configure parameters of cart-pendulum system
-constexpr uint8_t CMD_INIT     = 0x04;
-constexpr uint8_t CMD_BEGIN    = 0x05;
-constexpr uint8_t CMD_END      = 0x06;
+constexpr uint8_t CMD_INIT_STATE   = 0x04;  // set initial pendulum/cart kinematic state (haptic)
+constexpr uint8_t CMD_ENTER_HAPTIC = 0x05;  // enter the haptic loop (Task 0)
+// 0x06 reserved (was CMD_END — folded into CMD_EXIT_MODE)
 constexpr uint8_t CMD_SLEEP    = 0x07;
 constexpr uint8_t CMD_ENTER_COR = 0x08;  // enter center-out-reach mode (force, base 0, no physics)
 constexpr uint8_t CMD_MOVE_TO   = 0x09;  // quintic position move to a setpoint
-constexpr uint8_t CMD_EXIT_MODE = 0x0A;  // leave COR/MOVE_TO, return to idle
+constexpr uint8_t CMD_EXIT_MODE = 0x0A;  // leave the active loop (haptic or COR) → motor sleep / idle
 constexpr uint8_t CMD_CALIBRATE_HANDLE = 0x0B;  // 2 s handle baseline capture
 // 0x0C–0x0F reserved for Tasks 3/4 → ERR_BADOP.
 
@@ -118,9 +118,8 @@ constexpr uint8_t ERR_ANGLE_LIMIT     = 0x0A;  // pendulum exceeded the safety a
 constexpr size_t PAYLOAD_PING      = 0;
 constexpr size_t PAYLOAD_AUTOZERO  = 0;
 constexpr size_t PAYLOAD_CONFIG    = 28;  // 7 × float
-constexpr size_t PAYLOAD_INIT      = 16;  // 4 × float
-constexpr size_t PAYLOAD_BEGIN     = 0;
-constexpr size_t PAYLOAD_END       = 0;
+constexpr size_t PAYLOAD_INIT_STATE   = 16;  // 4 × float
+constexpr size_t PAYLOAD_ENTER_HAPTIC = 0;
 constexpr size_t PAYLOAD_SLEEP_CMD = 0;
 constexpr size_t PAYLOAD_ENTER_COR = 0;
 constexpr size_t PAYLOAD_MOVE_TO   = 16;  // 4 × float: setpoint_um, duration_s, loop_period_us, error_threshold_um
@@ -996,10 +995,11 @@ void haptic_loop() {
   if (f_cmd_mN_init < -par_max_force_mN) f_cmd_mN_init = -par_max_force_mN;
   prev_force_mN = (int32_t)f_cmd_mN_init;
 
-  send_ack(CMD_BEGIN);
+  send_ack(CMD_ENTER_HAPTIC);
 
   elapsedMicros loop_timer;
-  bool running = true;
+  bool    running  = true;
+  uint8_t exit_op  = CMD_EXIT_MODE;  // opcode to ack on exit (mirrors cor_loop)
 
   // loop_us reports the *previous* iteration's elapsed work time (steps 1–11,
   // including the UDP-command poll) since that duration isn't known until after
@@ -1103,8 +1103,9 @@ void haptic_loop() {
       if (pn > 0) {
         macIP   = Udp.remoteIP();
         macPort = Udp.remotePort();
-        if (pkt[0] == CMD_END || pkt[0] == CMD_SLEEP) {
+        if (pkt[0] == CMD_EXIT_MODE || pkt[0] == CMD_SLEEP) {
           running = false;
+          exit_op = pkt[0];
         } else if (pkt[0] == CMD_PING) {
           // Answer PING inline so the Mac's end-of-session clock_sync() works
           // while the loop is still streaming. Cheap and rare (only the ~11
@@ -1137,7 +1138,7 @@ void haptic_loop() {
     send_info(msg);
   }
   send_final_summary(last_sample, loop_cycle);
-  send_ack(CMD_END);
+  send_ack(exit_op);
 }
 
 // =====================================================================
@@ -1221,7 +1222,7 @@ void cor_loop() {
       if (pn > 0) {
         macIP   = Udp.remoteIP();
         macPort = Udp.remotePort();
-        if (pkt[0] == CMD_EXIT_MODE || pkt[0] == CMD_END || pkt[0] == CMD_SLEEP) {
+        if (pkt[0] == CMD_EXIT_MODE || pkt[0] == CMD_SLEEP) {
           running = false;
           exit_op = pkt[0];
         } else if (pkt[0] == CMD_PING) {
@@ -1271,7 +1272,7 @@ void send_error_with_pos(uint8_t err_code, int32_t pos_um) {
 }
 
 // =====================================================================
-// MOVE_TO (Tasks 1, 2) — quintic minimum-jerk position move.
+// MOVE_TO — quintic minimum-jerk position move.
 //
 // Drives the motor in Position Mode (stream sub-code SUB_POSITION_CTRL = 0x1E)
 // along a minimum-jerk profile from the current shaft position to setpoint_um
@@ -1453,8 +1454,8 @@ void handle_command(const uint8_t* pkt, size_t len) {
     break;
   }
 
-  case CMD_INIT: {
-    if (payload_len != PAYLOAD_INIT) { send_error(ERR_BADLEN); return; }
+  case CMD_INIT_STATE: {
+    if (payload_len != PAYLOAD_INIT_STATE) { send_error(ERR_BADLEN); return; }
     float vals[4];
     memcpy(vals, payload, 16);
     st_x        = (double)vals[0];
@@ -1462,12 +1463,12 @@ void handle_command(const uint8_t* pkt, size_t len) {
     st_xdot     = (double)vals[2];
     st_thetadot = (double)vals[3];
     state_initialized = true;
-    send_ack(CMD_INIT);
+    send_ack(CMD_INIT_STATE);
     break;
   }
 
-  case CMD_BEGIN: {
-    if (payload_len != PAYLOAD_BEGIN) { send_error(ERR_BADLEN); return; }
+  case CMD_ENTER_HAPTIC: {
+    if (payload_len != PAYLOAD_ENTER_HAPTIC) { send_error(ERR_BADLEN); return; }
 
     // 1. Must be configured
     if (!configured) {
@@ -1502,11 +1503,6 @@ void handle_command(const uint8_t* pkt, size_t len) {
     break;
   }
 
-  case CMD_END:
-    // If not in loop, just ack
-    send_ack(CMD_END);
-    break;
-
   case CMD_SLEEP:
     motor_sleep_safe();
     phase = Phase::IDLE;
@@ -1533,8 +1529,9 @@ void handle_command(const uint8_t* pkt, size_t len) {
   }
 
   case CMD_EXIT_MODE:
-    // Only meaningful inside cor_loop()/do_move_to() (handled there). Received at
-    // idle, just ack so the Mac's exit_cor() doesn't time out.
+    // Inside haptic_loop()/cor_loop()/do_move_to() this is caught by their UDP
+    // poll (handled there). Received at idle, just ack so the Mac's
+    // exit_haptic()/exit_cor() doesn't time out.
     if (payload_len != PAYLOAD_EXIT_MODE) { send_error(ERR_BADLEN); return; }
     send_ack(CMD_EXIT_MODE);
     break;

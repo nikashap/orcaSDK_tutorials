@@ -90,23 +90,23 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 | `0x01` | `CMD_PING` | none | 0 | Liveness check. Teensy replies `ACK 0x01`. |
 | `0x02` | `CMD_AUTOZERO` | none | 0 | Run motor autozero (see below). |
 | `0x03` | `CMD_CONFIG` | 7 × `float` | 28 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us, x_init, theta_init, xdot_init, thetadot_init`. (`loop_period_us` is a float for wire uniformity; round to integer µs on receipt.) |
-| `0x04` | `CMD_INIT` | 4 × `float` | 16 | Initial pendulum state, in order: `x0, theta0, xdot0, thetadot0`. |
-| `0x05` | `CMD_BEGIN` | none | 0 | Enter the haptic loop (see below). |
-| `0x06` | `CMD_END` | none | 0 | Exit the loop, sleep the motor (see below). |
+| `0x04` | `CMD_INIT_STATE` | 4 × `float` | 16 | Initial pendulum state, in order: `x0, theta0, xdot0, thetadot0`. |
+| `0x05` | `CMD_ENTER_HAPTIC` | none | 0 | Enter the haptic loop (see below). |
+| `0x06` | *reserved* | — | — | Was `CMD_END`; exit is now `CMD_EXIT_MODE` (`0x0A`). |
 | `0x07` | `CMD_SLEEP` | none | 0 | Immediate motor-sleep + idle, valid any time. |
 
 Opcodes `0x01`–`0x07` are the Step 4 haptic protocol documented here. `0x08`–`0x0B` were added later for Tasks 1/2 (`CMD_ENTER_COR`, `CMD_MOVE_TO`, `CMD_EXIT_MODE`) and the Step 3 force-handle boost (`CMD_CALIBRATE_HANDLE`) — see `TASK_OUTLINE.md` and the boost-params section below. `0x00` and `0x0C`–`0xFF` remain reserved; receiving a reserved opcode yields `ERR_BADOP`.
 
 Payload byte offsets for reference (all little-endian):
 - `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24.
-- `CMD_INIT`: `x0`@0, `theta0`@4, `xdot0`@8, `thetadot0`@12.
+- `CMD_INIT_STATE`: `x0`@0, `theta0`@4, `xdot0`@8, `thetadot0`@12.
 
 ### Command notes
 
 - `CMD_AUTOZERO` — command the motor's autozero procedure; allow 6 s, max force 50 N, max speed 100 mm/s. Block (or poll) until complete, then reply `ACK 0x02`. Reply `ERROR` if the motor reports a fault.
 - `CMD_CONFIG` — `max_force_mN` is the safety clip magnitude; `loop_period_us` is the target loop period (default 1800). Reply `ACK 0x03`.
-- `CMD_INIT` — $x, \dot x$ are overwritten by the first motor read; only $\theta, \dot\theta$ are honored. Reply `ACK 0x04`.
-- `CMD_BEGIN`, `CMD_END`, `CMD_SLEEP` — see below.
+- `CMD_INIT_STATE` — $x, \dot x$ are overwritten by the first motor read; only $\theta, \dot\theta$ are honored. Reply `ACK 0x04`.
+- `CMD_ENTER_HAPTIC`, `CMD_EXIT_MODE`, `CMD_SLEEP` — see below.
 
 ## Responses (Teensy → Mac)
 
@@ -130,7 +130,7 @@ struct __attribute__((packed)) Sample {
 };
 ```
 
-Document the struct layout in a comment so the Python side can `struct.unpack` it. Flush any partial batch on `CMD_END`.
+Document the struct layout in a comment so the Python side can `struct.unpack` it. Flush any partial batch on `CMD_EXIT_MODE`.
 
 ### Error-code table (one byte, follows `0xA2`)
 
@@ -142,7 +142,7 @@ Document the struct layout in a comment so the Python side can `struct.unpack` i
 | `0x04` | `ERR_SIGN_CHECK` | Startup sign-verification failed; loop refused to start. |
 | `0x05` | `ERR_NAN_STATE` | A physics state went non-finite. |
 | `0x06` | `ERR_MODBUS_TIMEOUT` | Motor exchange timed out. |
-| `0x07` | `ERR_NOT_CONFIGURED` | `CMD_BEGIN` received before a valid `CMD_CONFIG`. |
+| `0x07` | `ERR_NOT_CONFIGURED` | `CMD_ENTER_HAPTIC` received before a valid `CMD_CONFIG`. |
 | `0x08` | `ERR_MOVE_FAILED` | `CMD_MOVE_TO` (Tasks 1/2) ended outside threshold or faulted; reply carries the final position (`int32` µm). |
 | `0x09` | `ERR_HANDLE_CAL` | `CMD_CALIBRATE_HANDLE` measured an implausible handle baseline; reply carries the measured `[min,max]` band (2 × `float`). |
 
@@ -164,7 +164,7 @@ The mapping per side: zero inside the `[baseline_min, baseline_max]` deadband; a
 
 Payload is `5 × float` little-endian (`boost_min_mN`@0, `boost_max_mN`@4, `boost_dv`@8, `boost_k`@12, `boost_m`@16). The MWorks vars live in `common/teensy_common.mwel` (`Force Handle` group); `task1.py setup()` reads them and passes them to `TeensyInterface.calibrate_handle()`. The reply (`ACK 0x0B` on success, `ERROR 0x09` on reject) carries the measured `[min, max]` band as `2 × float` for per-session logging (`handle_baseline_min/max`, `handle_cal_ok`). The handle voltage and the pre-clip boost are streamed per cycle in `SampleCOR` (`handle_voltage`, `boost_human_mN`; see `TASK_OUTLINE.md`) and logged to CSV for bench tuning.
 
-## CMD_BEGIN — entry to the haptic loop
+## CMD_ENTER_HAPTIC — entry to the haptic loop
 
 1. Refuse to start if no valid `CMD_CONFIG` has been received: send `ERROR` with `ERR_NOT_CONFIGURED`.
 2. Refuse to start if the motor reports any active error: send `ERROR` with `ERR_MOTOR_FAULT` followed by the fault bits (`uint16`), and stay idle.
@@ -187,16 +187,16 @@ In order:
 8. **Integrate** $\theta, \dot\theta$ one RK4 step ($h = 1.8$ ms, $\ddot x$ ZOH).
 9. **Record** `loop_us` for this iteration.
 10. **Push** a `Sample` to the telemetry batch.
-11. **Check for UDP commands** (non-blocking) so `CMD_END`/`CMD_SLEEP` can interrupt.
+11. **Check for UDP commands** (non-blocking) so `CMD_EXIT_MODE`/`CMD_SLEEP` can interrupt.
 12. **Pace the loop:** if the iteration took less than `loop_period_us`, sleep until the period boundary (fixed-interval schedule). If it took longer, proceed to the next iteration immediately and (optionally) count the overrun.
 
 ### Error handling inside the loop
 
 If the motor reports a fault, or any state goes non-finite, or a Modbus exchange times out: stop the loop, put the motor into sleep mode immediately, send `ERROR` with the appropriate code (`ERR_MOTOR_FAULT`, `ERR_NAN_STATE`, or `ERR_MODBUS_TIMEOUT`), and return to idle. Safety takes priority over telemetry.
 
-## CMD_END / CMD_SLEEP
+## CMD_EXIT_MODE / CMD_SLEEP
 
-- On `CMD_END` (UDP) or any error: put the motor into sleep mode safely, flush the telemetry batch, then send a final summary packet beginning with byte `0xB1` followed by the most recent `Sample` struct and the total cycle count (`uint32`). Then send `ACK 0x06`.
+- On `CMD_EXIT_MODE` (UDP) or any error: put the motor into sleep mode safely, flush the telemetry batch, then send a final summary packet beginning with byte `0xB1` followed by the most recent `Sample` struct and the total cycle count (`uint32`). Then send `ACK` of the exiting opcode (`0x0A` for `CMD_EXIT_MODE`).
 - `CMD_SLEEP` is an immediate motor-sleep + idle, usable any time. Reply `ACK 0x07`.
 
 ## Build log and analysis code

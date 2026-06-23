@@ -121,7 +121,7 @@ Do not wire `boost_stiction` into Task 0 in this round — get `boost_human` fee
 
 ### C.0 — Handle calibration routine (run at start of every task)
 
-Write a standalone function in `teensy_cartpole_haptic.ino` (so all tasks share it), invoked once at experiment start — either from the BEGIN/setup path or via a `CMD_CALIBRATE_HANDLE` opcode (next free value) the Mac sends before `CMD_BEGIN`.
+Write a standalone function in `teensy_cartpole_haptic.ino` (so all tasks share it), invoked once at experiment start — either from the haptic-entry/setup path or via a `CMD_CALIBRATE_HANDLE` opcode (next free value) the Mac sends before `CMD_ENTER_HAPTIC`.
 
 - For **2 seconds**, with the handle at rest, sample the handle ADC and record the **min and max resting voltage** → `baseline_min`, `baseline_max`. These are **measured**, not assumed (they will land near 1.50–1.70 V but must be captured fresh each session — the AD620 offset can drift).
 - Report the measured baseline back to the Mac in an ACK payload so it is logged per session.

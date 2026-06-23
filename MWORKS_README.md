@@ -42,8 +42,8 @@ MWorks ──Python UDP client (RX thread)── UDP/Ethernet ── Teensy ─�
 
 The Python side no longer runs MuJoCo, no longer commands forces, and no longer paces a control loop. Its only jobs are:
 
-1. Configure the Teensy at trial start (`CMD_CONFIG`, `CMD_INIT`, `CMD_AUTOZERO`).
-2. Send `CMD_BEGIN` / `CMD_END` at the appropriate trial boundaries.
+1. Configure the Teensy at trial start (`CMD_CONFIG`, `CMD_INIT_STATE`, `CMD_AUTOZERO`).
+2. Send `CMD_ENTER_HAPTIC` / `CMD_EXIT_MODE` at the appropriate trial boundaries.
 3. Receive telemetry UDP batches in a background thread, parse them, set MWorks variables for rendering, and log every sample with enough metadata that post-hoc analysis can reconstruct the per-sample timeline.
 
 ## Files to Create
@@ -69,13 +69,13 @@ Define module-level constants for the protocol (mirror `HAPTIC_LOOP_README.md`):
 
 ```python
 # Opcodes (Mac → Teensy)
-CMD_PING     = 0x01
-CMD_AUTOZERO = 0x02
-CMD_CONFIG   = 0x03
-CMD_INIT     = 0x04
-CMD_BEGIN    = 0x05
-CMD_END      = 0x06
-CMD_SLEEP    = 0x07
+CMD_PING         = 0x01
+CMD_AUTOZERO     = 0x02
+CMD_CONFIG       = 0x03
+CMD_INIT_STATE   = 0x04
+CMD_ENTER_HAPTIC = 0x05
+# 0x06 reserved (was CMD_END — folded into CMD_EXIT_MODE)
+CMD_SLEEP        = 0x07
 
 # Reply leading bytes (Teensy → Mac)
 REPLY_ACK       = 0xA1
@@ -110,7 +110,7 @@ class TeensyInterface:
         ...
 ```
 
-`params` is a dict carrying `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us` for `CMD_CONFIG` and `x0, theta0, xdot0, thetadot0` for `CMD_INIT`. Default values live in `cart_pendulum.py`, not here.
+`params` is a dict carrying `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us` for `CMD_CONFIG` and `x0, theta0, xdot0, thetadot0` for `CMD_INIT_STATE`. Default values live in `cart_pendulum.py`, not here.
 
 ### UDP socket setup
 
@@ -122,8 +122,8 @@ Reuse any relevant functions from `haptic_bench.py`
 
 1. Send `CMD_AUTOZERO`, wait for `ACK 0x02`. (Optional: skip if a flag says autozero is already done.).
 2. Send `CMD_CONFIG` with the parameters from `params`, wait for `ACK 0x03`.
-3. Send `CMD_INIT` with initial state, wait for `ACK 0x04`.
-4. Send `CMD_BEGIN`, wait for `ACK 0x05`. Any `ERROR` reply must propagate to MWorks via `error(...)` and abort the experiment cleanly.
+3. Send `CMD_INIT_STATE` with initial state, wait for `ACK 0x04`.
+4. Send `CMD_ENTER_HAPTIC`, wait for `ACK 0x05`. Any `ERROR` reply must propagate to MWorks via `error(...)` and abort the experiment cleanly.
 
 After `ACK 0x05`, the RX thread should already be running (started in `start()`); telemetry will begin streaming in.
 
@@ -201,7 +201,7 @@ The `rendered_*` variables answer the question "what did the subject see?" — t
 
 ### `cleanup`
 
-1. Send `CMD_END`, wait briefly for `ACK 0x06` and the `0xB1` summary.
+1. Send `CMD_EXIT_MODE`, wait briefly for `ACK 0x0A` and the `0xB1` summary.
 2. Set the stop flag, join the RX thread.
 3. Close the socket.
 4. If a logger is attached, call `logger.stop()`.
@@ -291,7 +291,7 @@ The `t_meas_us` field is the authoritative timing for any per-sample analysis. T
 2. The visual scene animates at MWorks's display rate, using `rendered_cart_x` and `rendered_pendulum_angle` from the most recent sample of each batch. The variables should be rendered with live_queue as they currently are in the original cart_pendulum.mwel script.
 3. The MWorks event log contains, per UDP batch, exactly one set of `rendered_*` updates plus `N` sets of `sample_*` updates. Filtering on `sample_offset == 0` yields a time series that matches `rendered_*` 1:1.
 4. `sample_t_meas_us` is strictly increasing across a session, with consecutive deltas equal to the Teensy's `loop_period_us` ± measured loop jitter.
-5. Sending `CMD_END` (e.g. via experiment stop) reaches the Teensy, motor enters sleep, and the summary packet is logged.
+5. Sending `CMD_EXIT_MODE` (e.g. via experiment stop) reaches the Teensy, motor enters sleep, and the summary packet is logged.
 6. A behavioral pilot reproduces the qualitative feel and the trial-level performance metrics of the legacy `cart_pendulum_chris/` setup.
 7. No MuJoCo or `pyorcasdk` imports anywhere in the new directory.
 
@@ -343,7 +343,7 @@ didn't service `CMD_PING`, so no PING round succeeded and the second clock-sync 
 was missing ("no PING round succeeded").
 
 **Change:** the loop's step-11 UDP poll now answers `CMD_PING` inline
-(`send_ping_ack()`) in addition to handling `CMD_END`/`CMD_SLEEP`. Both clock-sync
+(`send_ping_ack()`) in addition to handling `CMD_EXIT_MODE`/`CMD_SLEEP`. Both clock-sync
 anchors are now captured, enabling skew-corrected post-hoc alignment.
 
 ### 4. Modbus timeouts — hold-last-value instead of retry (firmware)
