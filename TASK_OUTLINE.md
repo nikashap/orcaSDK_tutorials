@@ -4,7 +4,7 @@
 
 Grow the single base task in `cart_pendulum_teensy/` into a modular suite of task variants. Restructure the directory for modularity **while preserving the behavior of the existing Task 0 code**, then add Task 1 (center-out reaching) and Task 2 (pursuit). Tasks 3 and 4 are documented here for forward design but are **not built this round**.
 
-Two codebases change: the MWorks side (`cart_pendulum_teensy/`) and the Teensy sketch (`teensy_cartpole_haptic/teensy_cartpole_haptic.ino`). The Teensy gains two new protocol modes — `COR` and `MOVE_TO` — needed by Tasks 1 and 2.
+Two codebases change: the MWorks side (`cart_pendulum_teensy/`) and the Teensy sketch (canonical: `cart_pendulum_task/Arduino/teensy_cartpole_haptic/teensy_cartpole_haptic.ino`; the `orcaSDK_tutorials/test_teensy_orca/teensy_cartpole_haptic/` copy is the kept historical original). The Teensy gains two new protocol modes — `COR` and `MOVE_TO` — needed by Tasks 1 and 2.
 
 ## Build Scope This Round
 

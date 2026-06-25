@@ -6,7 +6,7 @@ Merge the validated cart-pole physics (Step 1) into the working Modbus/Ethernet 
 
 Build on `test_teensy_orca/teensy_orca_bridge` (QNEthernet, ALL_CAPS UDP command protocol, `ACK`/`ERROR` replies, Modbus over `Serial1` at 1 Mbaud). Do not start from scratch.
 
-Deliverable: `teensy_cartpole_haptic/teensy_cartpole_haptic.ino` plus a Python bench client `haptic_bench.py`.
+Deliverable: `teensy_cartpole_haptic/teensy_cartpole_haptic.ino` plus a Python bench client `haptic_bench.py`. **(As of 06/25/26 the canonical sketch lives at `cart_pendulum_task/Arduino/teensy_cartpole_haptic/teensy_cartpole_haptic.ino` — edit there; the copy under `orcaSDK_tutorials/test_teensy_orca/teensy_cartpole_haptic/` is the kept historical original.)**
 
 ## Physics (authoritative — supersedes any earlier draft)
 
@@ -89,7 +89,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 |---|---|---|---|---|
 | `0x01` | `CMD_PING` | none | 0 | Liveness check. Teensy replies `ACK 0x01`. |
 | `0x02` | `CMD_AUTOZERO` | none | 0 | Run motor autozero (see below). |
-| `0x03` | `CMD_CONFIG` | 7 × `float` | 28 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us, x_init, theta_init, xdot_init, thetadot_init`. (`loop_period_us` is a float for wire uniformity; round to integer µs on receipt.) |
+| `0x03` | `CMD_CONFIG` | 13 × `float` | 52 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us` then the boost_stiction params `stiction_enable, stiction_mult, stiction_v_thresh_mm_s, stiction_decay_mm_s, boost_combine_mode, boost_cap_mN` (Step 3 Part C; Task 0 only — COR ignores them). (`loop_period_us`/`boost_combine_mode`/`stiction_enable` are floats for wire uniformity; round/threshold on receipt.) See `TEENSY_API.md` for the authoritative field table. |
 | `0x04` | `CMD_INIT_STATE` | 4 × `float` | 16 | Initial pendulum state, in order: `x0, theta0, xdot0, thetadot0`. |
 | `0x05` | `CMD_ENTER_HAPTIC` | none | 0 | Enter the haptic loop (see below). |
 | `0x06` | *reserved* | — | — | Was `CMD_END`; exit is now `CMD_EXIT_MODE` (`0x0A`). |
@@ -98,7 +98,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 Opcodes `0x01`–`0x07` are the Step 4 haptic protocol documented here. `0x08`–`0x0B` were added later for Tasks 1/2 (`CMD_ENTER_COR`, `CMD_MOVE_TO`, `CMD_EXIT_MODE`) and the Step 3 force-handle boost (`CMD_CALIBRATE_HANDLE`) — see `TASK_OUTLINE.md` and the boost-params section below. `0x00` and `0x0C`–`0xFF` remain reserved; receiving a reserved opcode yields `ERR_BADOP`.
 
 Payload byte offsets for reference (all little-endian):
-- `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24.
+- `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24, `stiction_enable`@28, `stiction_mult`@32, `stiction_v_thresh_mm_s`@36, `stiction_decay_mm_s`@40, `boost_combine_mode`@44, `boost_cap_mN`@48.
 - `CMD_INIT_STATE`: `x0`@0, `theta0`@4, `xdot0`@8, `thetadot0`@12.
 
 ### Command notes
@@ -148,7 +148,7 @@ Document the struct layout in a comment so the Python side can `struct.unpack` i
 
 ## Force-handle boost parameters (`boost_human`, Step 3 Part C)
 
-The force-sensing handle adds an operator-driven assist force, `boost_human`, mapped from the handle ADC voltage on `A0` (12-bit, `v = raw * 3.3/4095`). It is currently wired into the fully-actuated COR loop (Tasks 1/2), added to the commanded force **before** the `max_force_mN` safety clip. Authoritative spec: `STICTION_BOOST_README.md` (C.0–C.2). The velocity-gated `boost_stiction` term and the Task 0 combination are a later round.
+The force-sensing handle adds an operator-driven assist force, `boost_human`, mapped from the handle ADC voltage on `A0` (12-bit, `v = raw * 3.3/4095`). It is wired into both the fully-actuated COR loop (Tasks 1/2) and the Task 0 haptic loop, added to the commanded force **before** the `max_force_mN` safety clip. Authoritative spec: `STICTION_BOOST_README.md` (C.0–C.2). The Task 0 haptic loop also adds `boost_stiction` — the compiled-in GP breakaway table applied at full strength below `stiction_v_thresh_mm_s` and exponentially decaying above (the "stiction_only" envelope from `Arduino/validate_controller`) — and combines the two boosts per `boost_combine_mode` (C.3/C.5); its six params ride in `CMD_CONFIG`. `boost_stiction` is Task 0 only (the COR loop ignores it). See `TEENSY_API.md` §7b.
 
 **Calibration + params are coupled.** `CMD_CALIBRATE_HANDLE` (`0x0B`) does two things in one shot: it samples the resting handle for 2 s to capture a fresh `[baseline_min, baseline_max]` voltage band, and it adopts the five `boost_human` shape params carried in its payload. So editing a param and recalibrating updates the feel **without reflashing**, and the update only ever lands at calibration time (never mid-trial). Until a session calibrates successfully, `boost_human` is forced to 0 and the COR loop is a transparent base-0 shaft. A bad baseline (band > 0.4 V, or pinned below 0.5 V / above 3.0 V) → `ERR_HANDLE_CAL` and the boost stays disabled.
 

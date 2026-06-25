@@ -27,6 +27,20 @@ Existing: `HAPTIC_LOOP_README.md` (`0x01`–`0x07`, telemetry `0xB0`), `TASK_OUT
 
 ## Part A — Static Friction Characterization (standalone sketch)
 
+> **STATUS (06/23/26): code complete, bench-pending.** Built under
+> `cart_pendulum_task/Arduino/stiction/`: `stiction.ino` (Teensy on-Teensy sweep,
+> reusing the haptic sketch's Modbus/`motor_exchange`/min-jerk scaffolding),
+> `stiction_logger.py` (Mac UDP driver/logger → `breakaway_data/sweep_<ts>/{sweep_data,summary}.csv`),
+> `build_stiction_dataset.py` + `train_stiction_model.py` (copied from
+> `orca_controllers`, paths localized, GP fit), and `export_stiction_header.py`
+> (GP means + constant fallback → `stiction_model.h` with inline
+> `stiction_lookup_mN`). The full fit→export pipeline is verified on synthetic
+> data (660-node header, figure-matching ranges). UDP uses a self-contained text
+> command set (`CONNECT`/`AUTOZERO`/`START_SWEEP …`/`ABORT`/`SLEEP`) + tagged
+> binary stream — independent of the haptic opcode table. Sweep orchestration is
+> on-Teensy (deterministic ramp). **TODO:** flash + bench-run a real sweep and
+> regenerate `stiction_model.h` before Part B / C.3. See `Arduino/stiction/README.md`.
+
 ### Location
 
 - Sketch: `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/Arduino/stiction/stiction.ino`
@@ -82,6 +96,22 @@ float stiction_lookup_mN(float pos_um, int direction);
 ---
 
 ## Part B — Controller Validation (standalone sketch)
+
+> **STATUS (06/23/26): code complete, bench-pending.** Built under
+> `cart_pendulum_task/Arduino/validate_controller/`: `validate_controller.ino`
+> (Teensy replay sketch, reuses `stiction.ino`'s Modbus/`motor_exchange`/min-jerk
+> scaffolding, `#include`s `stiction_model.h`; UDP text protocol
+> `CONNECT`/`AUTOZERO`/`RUN_TRAJ …`/`ABORT`/`SLEEP` + tagged `ValSample` (34 B)
+> stream), `validate_logger.py` (Mac driver: mirrors the notebook §4 rejection
+> sampler, computes the desired free-mass trajectory, runs each trajectory
+> comp-off then comp-on, reports position-tracking RMS off vs on →
+> `validation_data/run_<ts>/{traj_<i>_{off,on}.csv, summary.csv}`), and
+> `README.md`. Trajectory math + struct sizes verified offline; the sampler now
+> rejects on the *actual* integrated path (the notebook's free-mass displacement
+> estimate let some trajectories leave the stroke). `export_stiction_header.py`
+> auto-copies `stiction_model.h` into the sketch folder. **TODO:** generate a real
+> `stiction_model.h` from a full Part A sweep, then flash + bench-run; confirm the
+> `sign(f_cmd)`↔table sign convention on hardware.
 
 ### Location
 
@@ -153,9 +183,35 @@ Continuous, monotonic, zero in the deadband, sign = push direction. Suggested fo
 
 `boost_human` depends **only** on handle voltage; it is **not** velocity-gated — it applies whether or not the shaft is moving.
 
-### C.3 — `boost_stiction` (Task 0 phase only; gating per `ilc_runner.py`)
+### C.3 — `boost_stiction` (Task 0 phase only; threshold + exponential-decay envelope)
 
-The authoritative gating, lifted from `ilc_runner.py` (the `stiction_enabled` block):
+> **STATUS (06/25/26): implemented, bench-pending.** `boost_stiction` + the C.5
+> combine modes are wired into `teensy_cartpole_haptic.ino`'s `haptic_loop()`
+> (Task 0 only; the COR loop is untouched). The sketch now `#include`s
+> `stiction_model.h` (auto-copied by `export_stiction_header.py`). Magnitude =
+> `stiction_lookup_mN(pos, dir) * stiction_mult * env`, where `env = 1` for
+> `|v| <= stiction_v_thresh_mm_s` and `exp(-(|v|-v_thresh)/stiction_decay_mm_s)`
+> above it (the "stiction_only" envelope from `Arduino/validate_controller`);
+> `dir = sign(f_command)` at/below the threshold, `sign(v)` above. Six params ride
+> in `CMD_CONFIG` (now `<13f>`, 52 B): `stiction_enable, stiction_mult,
+> stiction_v_thresh_mm_s, stiction_decay_mm_s, boost_combine_mode, boost_cap_mN` —
+> all adjustable in `common/teensy_common.mwel` ('Stiction Boost' group), read each
+> `reset()`. Telemetry (`boost_stiction_mN`, `stiction_gate`, `boost_combined_mN`)
+> already existed in the 68 B `Sample`; now populated. Mac: `teensy_interface.py`
+> `CONFIG_FMT`, `helpers.build_config_params()`. Docs: `TEENSY_API.md` §7b + CONFIG
+> table, `HAPTIC_LOOP_README.md`. **TODO:** flash + bench-run; confirm the boost
+> feels right with the dynamics and the `sign(f_command)`↔table sign convention.
+
+Use the design decision we formulated from validate_controller.
+Decision: stiction is fully applied under a certain velocity threshold and exponentially decays.
+Default parameters: v_thresh = 350, decay = 100
+Be sure that these parameters are adjustable in teensy_common.mwel
+
+> **Note (06/25/26):** the `exp(-(v/epsilon)^2)` gate below is the *old* ILC design;
+> it has been **superseded** by the threshold + exponential-decay envelope above.
+> Kept here only for provenance / sign conventions.
+
+An old example gating, lifted from `ilc_runner.py` (the `stiction_enabled` block):
 
 ```python
 sign_xddot = np.sign(f_command) if f_command != 0.0 else 1.0

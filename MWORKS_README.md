@@ -18,7 +18,7 @@ This step ports the existing MWorks experiment from `cart_pendulum_task/cart_pen
 
 - **Old (working) MWorks experiment, FTDI + MuJoCo:** `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/cart_pendulum_chris/`
   - `cart_pendulum.mwel`, `cart_pendulum.py`, `orca_interface.py`, `data_logger.py` — copy the structure and trial flow; replace only the parts described below.
-- **Teensy sketch and protocol spec:** `/Users/Nikasha/Documents/GitHub/orcaSDK_tutorials/test_teensy_orca/teensy_cartpole_haptic` and `HAPTIC_LOOP_README.md`.
+- **Teensy sketch and protocol spec:** `/Users/Nikasha/Documents/GitHub/cart_pendulum_task/Arduino/teensy_cartpole_haptic` (canonical, edit here; the `orcaSDK_tutorials/test_teensy_orca/teensy_cartpole_haptic` copy is the kept historical original) and `HAPTIC_LOOP_README.md`.
   - The opcode table, `Sample` struct layout, and error codes defined there are authoritative — do not redefine them here.
   - Read this file as a reference `/Users/Nikasha/Documents/GitHub/orcaSDK_tutorials/test_teensy_orca/haptic_bench.py`
   - The `haptic_bench.py` file is a working example script for interfacing python with the teensy

@@ -22,6 +22,7 @@
 
 #include <QNEthernet.h>
 #include <math.h>
+#include "stiction_model.h"   // Part A export: stiction_lookup_mN (boost_stiction, Task 0)
 using namespace qindesign::network;
 
 // =====================================================================
@@ -117,7 +118,7 @@ constexpr uint8_t ERR_ANGLE_LIMIT     = 0x0A;  // pendulum exceeded the safety a
 // Expected payload sizes per opcode
 constexpr size_t PAYLOAD_PING      = 0;
 constexpr size_t PAYLOAD_AUTOZERO  = 0;
-constexpr size_t PAYLOAD_CONFIG    = 28;  // 7 × float
+constexpr size_t PAYLOAD_CONFIG    = 52;  // 13 × float (7 physics/loop + 6 boost_stiction)
 constexpr size_t PAYLOAD_INIT_STATE   = 16;  // 4 × float
 constexpr size_t PAYLOAD_ENTER_HAPTIC = 0;
 constexpr size_t PAYLOAD_SLEEP_CMD = 0;
@@ -137,6 +138,31 @@ double par_g            = 9.81;
 double par_max_force_mN = 0.0;
 uint32_t par_loop_us    = 1800;
 bool configured = false;
+
+// =====================================================================
+// boost_stiction — Task 0 haptic loop only.
+//
+// Compensates the shaft's physical static friction so the rendered dynamics stay
+// faithful as the shaft slows into the stiction regime. Magnitude comes from the
+// compiled-in GP breakaway table (stiction_model.h): the FULL looked-up F_static
+// for |v| <= par_stiction_v_thresh_mmps, then exponentially decaying with speed
+// scale par_stiction_decay_mmps above it (the "stiction_only" envelope formulated
+// in Arduino/validate_controller). Direction = sign(f_command) at/below the
+// threshold (intended push at rest), sign(v) above (friction opposes motion).
+// All five fields arrive in CMD_CONFIG; defaults below keep the boost OFF until a
+// session configures it, so Task 0 is unchanged when disabled.
+//
+// Combine mode folds boost_stiction together with the handle boost_human.
+constexpr uint8_t COMBINE_ADDITIVE_CAPPED = 0;  // sum, clip combined magnitude to cap
+constexpr uint8_t COMBINE_HUMAN_OVERRIDE  = 1;  // human alone when out of deadband, else stiction
+constexpr uint8_t COMBINE_MAX_ALIGNED     = 2;  // same sign -> larger magnitude; opposite -> sum
+
+bool    par_stiction_enable      = false;
+double  par_stiction_mult        = 1.0;
+double  par_stiction_v_thresh_mmps = 350.0;
+double  par_stiction_decay_mmps    = 100.0;
+uint8_t par_boost_combine_mode   = COMBINE_ADDITIVE_CAPPED;
+double  par_boost_cap_mN         = 50000.0;
 
 // Safety abort (haptic loop only): if the pendulum swings past this angle from
 // hanging (theta=0 is straight down), the loop stops, sleeps the motor, and
@@ -217,12 +243,11 @@ bool   state_initialized = false;
 // =====================================================================
 // Telemetry sample (packed binary, little-endian)
 //
-// The five force-boost fields are appended after the
-// haptic fields and before loop_us. In the boost_human-in-Task-0 phase only
-// handle_voltage / boost_human_mN / boost_combined_mN carry signal;
-// boost_stiction_mN and stiction_gate are reserved (held 0) for the later
-// boost_stiction phase, so the wire format is its final shape now and the Mac
-// parser never has to break again when stiction lands.
+// The five force-boost fields are appended after the haptic fields and before
+// loop_us. All now carry signal in Task 0: handle_voltage / boost_human_mN from
+// the handle, boost_stiction_mN / stiction_gate from the gated GP breakaway
+// (0 when stiction_enable is false), and boost_combined_mN = the post-combine
+// boost actually applied (combine_boosts()).
 //
 // Python struct format: '<II14fI'
 // Total: 4+4 + 14*4 + 4 = 68 bytes
@@ -236,11 +261,11 @@ struct __attribute__((packed)) Sample {
   float    fpc;
   float    f_command_mN;
   float    force_sensed_mN;   // motor_tele.force_mn (lags ~3 frames)
-  float    handle_voltage;    // raw handle ADC voltage this cycle (V)
+  float    handle_voltage;    // EMA-smoothed handle ADC voltage this cycle (V)
   float    boost_human_mN;    // boost_human before clip (signed mN)
-  float    boost_stiction_mN; // 0 until the Task 0 boost_stiction phase
-  float    stiction_gate;     // velocity gate 0..1 (0 until stiction phase)
-  float    boost_combined_mN; // total boost added before clip (== boost_human now)
+  float    boost_stiction_mN; // gated stiction boost before clip (signed mN); 0 when disabled
+  float    stiction_gate;     // stiction velocity envelope 0..1; 0 when disabled
+  float    boost_combined_mN; // combined boost added before clip (combine_boosts)
   uint32_t loop_us;
 };
 static_assert(sizeof(Sample) == 68, "Sample struct packing");
@@ -957,6 +982,60 @@ bool calibrate_handle(float* out_min, float* out_max) {
   return true;
 }
 
+// boost_stiction: compiled-in GP breakaway table, applied at FULL strength
+// for |v| <= par_stiction_v_thresh_mmps, then exponentially decaying with speed
+// scale par_stiction_decay_mmps above it. Direction follows the intended command
+// (sign of f_dyn_mN) at/below the threshold — no motion sign yet — and the actual
+// motion (sign of v) above it, since sliding friction opposes velocity. Writes
+// the envelope it used into *out_gate (0..1). Returns 0 / gate 0 when disabled.
+float boost_stiction_mN(double f_dyn_mN, double v_mmps, int32_t pos_um,
+                        float* out_gate) {
+  *out_gate = 0.0f;
+  if (!par_stiction_enable) return 0.0f;
+
+  double abs_v = fabs(v_mmps);
+  double env;
+  int    dir;
+  if (abs_v <= par_stiction_v_thresh_mmps) {
+    env = 1.0;                              // full F_static near rest
+    dir = (f_dyn_mN >= 0.0) ? +1 : -1;      // directed by the intended command
+  } else {
+    env = (par_stiction_decay_mmps > 0.0)
+          ? exp(-(abs_v - par_stiction_v_thresh_mmps) / par_stiction_decay_mmps)
+          : 0.0;                            // <=0 -> hard cutoff above the threshold
+    dir = (v_mmps >= 0.0) ? +1 : -1;        // directed by actual motion (opposes v)
+  }
+  *out_gate = (float)env;
+  // Table is signed (positive extend / negative retract), so dir already carries
+  // the sign; mult scales it, env applies the velocity envelope.
+  return stiction_lookup_mN((float)pos_um, dir)
+         * (float)par_stiction_mult * (float)env;
+}
+
+// Combine the handle boost_human with boost_stiction per the runtime mode (C.5).
+// Both are signed mN (same sign = reinforce, opposite = partial cancel).
+float combine_boosts(float boost_human, float boost_stiction) {
+  switch (par_boost_combine_mode) {
+    case COMBINE_HUMAN_OVERRIDE:
+      // Human actively pushing (out of deadband) -> use it alone, else stiction.
+      return (boost_human != 0.0f) ? boost_human : boost_stiction;
+    case COMBINE_MAX_ALIGNED: {
+      bool same_sign = (boost_human >= 0.0f) == (boost_stiction >= 0.0f);
+      if (same_sign)  // friction is overcome once -> take the larger magnitude
+        return (fabsf(boost_human) >= fabsf(boost_stiction)) ? boost_human
+                                                             : boost_stiction;
+      return boost_human + boost_stiction;  // opposite signs -> sum (partial cancel)
+    }
+    case COMBINE_ADDITIVE_CAPPED:
+    default: {
+      float c = boost_human + boost_stiction;
+      if (c >  (float)par_boost_cap_mN) c =  (float)par_boost_cap_mN;
+      if (c < -(float)par_boost_cap_mN) c = -(float)par_boost_cap_mN;
+      return c;
+    }
+  }
+}
+
 // ACK/ERROR reply carrying the measured baseline (two little-endian floats), so
 // the Mac logs the band per session even when calibration fails.
 void send_handle_cal_reply(uint8_t tag, uint8_t code, float vmin, float vmax) {
@@ -1033,18 +1112,24 @@ void haptic_loop() {
     double f_cmd = compute_force(st_theta, st_thetadot, st_xddot,
                                  &thetaddot, &fx, &fpc);
 
-    // --- 7. Convert to mN, add the handle boost, then clip ---
-    // boost_human is just an ADC read mapped to a signed assist force; it is added
-    // before the safety clip (C.4). boost_stiction is NOT wired in this phase
-    // (held 0), so the combined boost is boost_human alone. Until a session runs
-    // CMD_CALIBRATE_HANDLE the boost is 0 and Task 0 behaves exactly as before.
-    double f_cmd_mN = f_cmd * 1000.0;
+    // --- 7. Convert to mN, add the boosts (combined), then clip ---
+    // Two assist terms, both added before the safety clip:
+    //   boost_human    — handle ADC mapped to a signed assist force (deadband -> 0)
+    //   boost_stiction — gated GP breakaway compensating the shaft's static
+    //                    friction (sign keyed to the pre-boost dynamics command at
+    //                    rest, to motion while sliding). 0 unless configured.
+    // combine_boosts() folds them per par_boost_combine_mode. f_dyn_mN below
+    // is the pure dynamics command (pre-boost) — its sign is the intended push, so
+    // it drives the at-rest stiction direction. With the handle uncalibrated AND
+    // stiction disabled, both boosts are 0 and Task 0 behaves exactly as before.
+    double f_dyn_mN = f_cmd * 1000.0;
     float  v_handle       = read_handle_voltage_filtered();   // EMA-smoothed
     float  boost_h_mN     = boost_human_mN(v_handle);
-    float  boost_stict_mN = 0.0f;                      // boost_stiction phase: not yet
     float  stiction_gate  = 0.0f;
-    float  boost_comb_mN  = boost_h_mN + boost_stict_mN;
-    f_cmd_mN += (double)boost_comb_mN;
+    float  boost_stict_mN = boost_stiction_mN(f_dyn_mN, (double)ex.speed_mmps,
+                                              ex.position_um, &stiction_gate);
+    float  boost_comb_mN  = combine_boosts(boost_h_mN, boost_stict_mN);
+    double f_cmd_mN = f_dyn_mN + (double)boost_comb_mN;
     if (f_cmd_mN >  par_max_force_mN) f_cmd_mN =  par_max_force_mN;
     if (f_cmd_mN < -par_max_force_mN) f_cmd_mN = -par_max_force_mN;
     prev_force_mN = (int32_t)f_cmd_mN;
@@ -1429,8 +1514,8 @@ void handle_command(const uint8_t* pkt, size_t len) {
 
   case CMD_CONFIG: {
     if (payload_len != PAYLOAD_CONFIG) { send_error(ERR_BADLEN); return; }
-    float vals[7];
-    memcpy(vals, payload, 28);
+    float vals[13];
+    memcpy(vals, payload, 52);
 
     par_m_c          = (double)vals[0];
     par_m_p          = (double)vals[1];
@@ -1439,6 +1524,15 @@ void handle_command(const uint8_t* pkt, size_t len) {
     par_g            = (double)vals[4];
     par_max_force_mN = (double)vals[5];
     par_loop_us      = (uint32_t)(vals[6] + 0.5f);
+
+    // boost_stiction params (Step 3 Part C). Task 0 haptic loop only; the COR
+    // tasks ignore them. Edits in teensy_common.mwel land here each reset().
+    par_stiction_enable        = (vals[7]  > 0.5f);
+    par_stiction_mult          = (double)vals[8];
+    par_stiction_v_thresh_mmps = (double)vals[9];
+    par_stiction_decay_mmps    = (double)vals[10];
+    par_boost_combine_mode     = (uint8_t)(vals[11] + 0.5f);
+    par_boost_cap_mN           = (double)vals[12];
 
     configured = true;
 
