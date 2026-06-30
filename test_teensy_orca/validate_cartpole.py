@@ -24,7 +24,8 @@ from cartpole_reference import (make_fx_func, solve_reference,
 from test_cases import (CASES, get_case, TestCase,
                         SWEEP_X0_VALUES, SWEEP_RESIDUAL_TOL,
                         CONVERGENCE_DTS, CONVERGENCE_SLOPE_RANGE,
-                        ENERGY_MAX_DRIFT, ENERGY_MAX_MOMENTUM)
+                        ENERGY_MAX_DRIFT, ENERGY_MAX_MOMENTUM,
+                        DAMPING_B_VALUES, DAMPING_TOL_ANGLE, DAMPING_TOL_ANGVEL)
 
 DEFAULT_IP = "192.168.1.177"
 DEFAULT_PORT = 8888
@@ -70,7 +71,7 @@ def run_on_teensy(case, teensy_ip, teensy_port):
     addr = (teensy_ip, teensy_port)
     try:
         _send(sock, addr,
-              f"SIM_CONFIG {case.m_c} {case.m_p} {case.l} {case.g}")
+              f"SIM_CONFIG {case.m_c} {case.m_p} {case.l} {case.g} {case.b}")
         if not _wait_ack(sock, "SIM_CONFIG"):
             raise RuntimeError("SIM_CONFIG not acknowledged")
 
@@ -120,7 +121,7 @@ def compute_ref(case, times):
     fx_func = make_fx_func(case.fx_mode, case.fx_param1, case.fx_param2)
     sol = solve_reference(
         [case.x0, case.theta0, case.xdot0, case.thetadot0],
-        case.duration, case.m_c, case.m_p, case.l, case.g, fx_func)
+        case.duration, case.m_c, case.m_p, case.l, case.g, fx_func, case.b)
     return sol.sol(times).T  # (N, 4)
 
 
@@ -327,6 +328,58 @@ def run_sweep(teensy_ip, teensy_port, results_dir):
     return passed, summary
 
 
+def run_damping(teensy_ip, teensy_port, results_dir):
+    """Validate pendulum-joint damping against the b-aware reference.
+
+    Sweeps b over DAMPING_B_VALUES on a large free swing (theta0 = pi/3) so the
+    damped decay is exercised, runs each on the Teensy, and compares to the scipy
+    reference solved with the SAME b. Also emits an overlay of theta(t) showing the
+    decay grow with b — a quick visual sanity check that damping removes energy.
+    """
+    print(f"\n--- damping_sweep ---")
+    base = replace(get_case("large_swing"),
+                   tol_angle=DAMPING_TOL_ANGLE, tol_angvel=DAMPING_TOL_ANGVEL)
+    all_passed = True
+    fails = []
+    overlay = []  # (b, times, theta)
+
+    for b in DAMPING_B_VALUES:
+        case = replace(base, name=f"damp_b={b:g}", b=b)
+        times, states, _, nsteps, wall_us = run_on_teensy(
+            case, teensy_ip, teensy_port)
+        ref = compute_ref(case, times)
+        err = states - ref
+        max_errs = np.max(np.abs(err), axis=0)
+        passed, dominant = check_tol(case, err)
+        overlay.append((b, times, states[:, 1]))
+        tag = "PASS" if passed else "FAIL"
+        print(f"  b={b:<8g} {len(times):>5} samples  "
+              f"max|Δθ|={max_errs[1]:.2e}  max|Δθ̇|={max_errs[3]:.2e}  -> {tag}")
+        plot_standard(case, times, states, ref, err,
+                      os.path.join(results_dir, f"{case.name}.png"), passed)
+        if not passed:
+            all_passed = False
+            fails.append(f"b={b:g} ({dominant})")
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    for b, t, th in overlay:
+        ax.plot(t, th, lw=1.0, label=f"b={b:g}")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("θ (rad)")
+    ax.set_title("Pendulum-joint damping sweep — θ(t) (decay grows with b)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, "damping_sweep_overlay.png"), dpi=150)
+    plt.close()
+
+    tag = "PASS" if all_passed else "FAIL"
+    dominant = "all b within tol" if all_passed else "; ".join(fails)
+    summary = f"  {tag}  damping_sweep: {dominant}"
+    print(summary)
+    return all_passed, summary
+
+
 def run_convergence(teensy_ip, teensy_port, results_dir):
     """Run convergence test: error vs. dt on log-log, check first-order slope."""
     print(f"\n--- convergence ---")
@@ -382,7 +435,8 @@ def run_convergence(teensy_ip, teensy_port, results_dir):
 
 # ── Main ─────────────────────────────────────────────────────────────
 
-ALL_CASE_NAMES = [c.name for c in CASES] + ["x_offset_sweep", "convergence"]
+ALL_CASE_NAMES = [c.name for c in CASES] + ["x_offset_sweep", "convergence",
+                                            "damping_sweep"]
 
 
 def main():
@@ -436,6 +490,8 @@ def main():
     for name in names:
         if name == "x_offset_sweep":
             ok, s = run_sweep(args.ip, args.port, results_dir)
+        elif name == "damping_sweep":
+            ok, s = run_damping(args.ip, args.port, results_dir)
         elif name == "convergence":
             ok, s = run_convergence(args.ip, args.port, results_dir)
         elif name == "energy_conservation":

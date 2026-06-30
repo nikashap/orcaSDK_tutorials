@@ -89,7 +89,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 |---|---|---|---|---|
 | `0x01` | `CMD_PING` | none | 0 | Liveness check. Teensy replies `ACK 0x01`. |
 | `0x02` | `CMD_AUTOZERO` | none | 0 | Run motor autozero (see below). |
-| `0x03` | `CMD_CONFIG` | 13 × `float` | 52 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us` then the boost_stiction params `stiction_enable, stiction_mult, stiction_v_thresh_mm_s, stiction_decay_mm_s, boost_combine_mode, boost_cap_mN` (Step 3 Part C; Task 0 only — COR ignores them). (`loop_period_us`/`boost_combine_mode`/`stiction_enable` are floats for wire uniformity; round/threshold on receipt.) See `TEENSY_API.md` for the authoritative field table. |
+| `0x03` | `CMD_CONFIG` | 15 × `float` | 60 | Set parameters, in order: `m_c, m_p, m_s, l, g, max_force_mN, loop_period_us` then the boost_stiction params `stiction_enable, stiction_mult, stiction_v_thresh_mm_s, stiction_decay_mm_s, stiction_force_thresh_mN, stiction_force_decay_mN, boost_combine_mode, boost_cap_mN` (Step 3 Part C; Task 0 only — COR ignores them). (`loop_period_us`/`boost_combine_mode`/`stiction_enable` are floats for wire uniformity; round/threshold on receipt.) See `TEENSY_API.md` for the authoritative field table. |
 | `0x04` | `CMD_INIT_STATE` | 4 × `float` | 16 | Initial pendulum state, in order: `x0, theta0, xdot0, thetadot0`. |
 | `0x05` | `CMD_ENTER_HAPTIC` | none | 0 | Enter the haptic loop (see below). |
 | `0x06` | *reserved* | — | — | Was `CMD_END`; exit is now `CMD_EXIT_MODE` (`0x0A`). |
@@ -98,7 +98,7 @@ All multi-byte payload fields are little-endian. Floating-point parameters are `
 Opcodes `0x01`–`0x07` are the Step 4 haptic protocol documented here. `0x08`–`0x0B` were added later for Tasks 1/2 (`CMD_ENTER_COR`, `CMD_MOVE_TO`, `CMD_EXIT_MODE`) and the Step 3 force-handle boost (`CMD_CALIBRATE_HANDLE`) — see `TASK_OUTLINE.md` and the boost-params section below. `0x00` and `0x0C`–`0xFF` remain reserved; receiving a reserved opcode yields `ERR_BADOP`.
 
 Payload byte offsets for reference (all little-endian):
-- `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24, `stiction_enable`@28, `stiction_mult`@32, `stiction_v_thresh_mm_s`@36, `stiction_decay_mm_s`@40, `boost_combine_mode`@44, `boost_cap_mN`@48.
+- `CMD_CONFIG`: `m_c`@0, `m_p`@4, `m_s`@8, `l`@12, `g`@16, `max_force_mN`@20, `loop_period_us`@24, `stiction_enable`@28, `stiction_mult`@32, `stiction_v_thresh_mm_s`@36, `stiction_decay_mm_s`@40, `stiction_force_thresh_mN`@44, `stiction_force_decay_mN`@48, `boost_combine_mode`@52, `boost_cap_mN`@56.
 - `CMD_INIT_STATE`: `x0`@0, `theta0`@4, `xdot0`@8, `thetadot0`@12.
 
 ### Command notes

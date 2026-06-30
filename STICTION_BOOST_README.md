@@ -1,5 +1,18 @@
 # Step 3 — Static Friction Characterization & Force-Boost Integration
 
+> **✅ STATUS: COMPLETE (bench-verified 06/25/26).** All three deliverables are
+> built and bench-verified: Part A (characterization sweep → GP fit →
+> `stiction_model.h`), Part B (`validate_controller` open-loop validation), and
+> Part C (`boost_human` + `boost_stiction` + combine modes wired into the Task 0
+> haptic loop, with velocity/accel EMA smoothing and the force-magnitude
+> anti-sign-flip envelope). The stiction incorporation runs smoothly in the live
+> experiment. **Remaining work is parameter feel-tuning only** — the knobs in the
+> `'Stiction Boost'` / `'Force Handle'` groups of `common/teensy_common.mwel`
+> (`stiction_mult`, `stiction_v_thresh_mm_s`, `stiction_decay_mm_s`,
+> `stiction_force_thresh_mN`, `stiction_force_decay_mN`, `boost_combine_mode`,
+> `boost_cap_mN`, handle boost shape) and the EMA alphas — not new functionality.
+> Per-section status notes below record the build/bench history.
+
 ## Purpose
 
 Three deliverables, built as **separate, modular Teensy sketches** plus force-boost integration into the task code:
@@ -185,22 +198,41 @@ Continuous, monotonic, zero in the deadband, sign = push direction. Suggested fo
 
 ### C.3 — `boost_stiction` (Task 0 phase only; threshold + exponential-decay envelope)
 
-> **STATUS (06/25/26): implemented, bench-pending.** `boost_stiction` + the C.5
-> combine modes are wired into `teensy_cartpole_haptic.ino`'s `haptic_loop()`
+> **STATUS (06/25/26): implemented + bench-verified — feel-tuning only remains.**
+> `boost_stiction` + the C.5 combine modes are wired into
+> `teensy_cartpole_haptic.ino`'s `haptic_loop()`
 > (Task 0 only; the COR loop is untouched). The sketch now `#include`s
 > `stiction_model.h` (auto-copied by `export_stiction_header.py`). Magnitude =
 > `stiction_lookup_mN(pos, dir) * stiction_mult * env`, where `env = 1` for
 > `|v| <= stiction_v_thresh_mm_s` and `exp(-(|v|-v_thresh)/stiction_decay_mm_s)`
 > above it (the "stiction_only" envelope from `Arduino/validate_controller`);
 > `dir = sign(f_command)` at/below the threshold, `sign(v)` above. Six params ride
-> in `CMD_CONFIG` (now `<13f>`, 52 B): `stiction_enable, stiction_mult,
-> stiction_v_thresh_mm_s, stiction_decay_mm_s, boost_combine_mode, boost_cap_mN` —
-> all adjustable in `common/teensy_common.mwel` ('Stiction Boost' group), read each
-> `reset()`. Telemetry (`boost_stiction_mN`, `stiction_gate`, `boost_combined_mN`)
-> already existed in the 68 B `Sample`; now populated. Mac: `teensy_interface.py`
+> in `CMD_CONFIG` (now `<15f>`, 60 B): `stiction_enable, stiction_mult,
+> stiction_v_thresh_mm_s, stiction_decay_mm_s, stiction_force_thresh_mN,
+> stiction_force_decay_mN, boost_combine_mode, boost_cap_mN` — all adjustable in
+> `common/teensy_common.mwel` ('Stiction Boost' group), read each `reset()`.
+> Telemetry (`boost_stiction_mN`, `stiction_gate`, `boost_combined_mN`) already
+> existed in the 68 B `Sample`; now populated. Mac: `teensy_interface.py`
 > `CONFIG_FMT`, `helpers.build_config_params()`. Docs: `TEENSY_API.md` §7b + CONFIG
-> table, `HAPTIC_LOOP_README.md`. **TODO:** flash + bench-run; confirm the boost
-> feels right with the dynamics and the `sign(f_command)`↔table sign convention.
+> table, `HAPTIC_LOOP_README.md`.
+>
+> **Bench iteration 1 (06/25/26).** Two fixes: (1) the haptic loop now EMA-smooths
+> the motor's reported speed (`VEL_EMA_ALPHA` 0.30) and acceleration
+> (`ACCEL_EMA_ALPHA` 0.20) before using them — accel feeds RK4, speed is the
+> stiction reference — to stop raw-signal noise jittering the dynamics; alpha-sweep
+> analysis added as notebook §4d. (2) A **force-magnitude envelope** on
+> `boost_stiction`: full above `stiction_force_thresh_mN` (default 300 mN),
+> exp-decaying (scale `stiction_force_decay_mN`, default 100) to ~0 below it — kills
+> the `±F_static` sign flip near `f_command = 0` that jittered the shaft when the
+> pendulum dangled at rest. `stiction_gate` telemetry is now the total
+> velocity×force envelope. The same force envelope was mirrored into
+> `validate_controller` (`--force-thresh`/`--force-decay`) for off-loop tuning.
+>
+> **Bench-verified (06/25/26).** Flashed + run in the live experiment; the EMA
+> smoothing, the velocity envelope, and the force-magnitude anti-sign-flip gate
+> together give a smooth boost with no shaft jitter at rest, and the
+> `sign(f_command)`↔table direction convention is correct on hardware. C.3 is
+> functionally complete — only parameter feel-tuning remains.
 
 Use the design decision we formulated from validate_controller.
 Decision: stiction is fully applied under a certain velocity threshold and exponentially decays.
@@ -261,11 +293,17 @@ Update `data_logger.py` `FIELDS` and the Mac-side `struct` unpack to match.
 
 ## Acceptance Criteria
 
+> **✅ All criteria met (bench-verified 06/25/26).** Note criterion 5 below was
+> revised during development: the `exp(-(v/5.0)^2)` ILC gate was **superseded** by
+> the threshold + exponential-decay velocity envelope (C.3) plus the
+> force-magnitude anti-sign-flip envelope — see the C.3 status note for what
+> actually shipped.
+
 1. **Characterization sketch** (`Arduino/stiction/stiction.ino`) sweeps the full stroke over `n_points` positions × both directions via quasi-static breakaway, logs raw ramps + breakaway points to `Arduino/stiction/`, and a Python helper fits the GP (reusing `orca_controllers` code) and exports `stiction_model.h` with **means only**, plus a constant fallback.
 2. **Validation sketch** (`Arduino/validate_controller/validate_controller.ino`) `#include`s `stiction_model.h`, interpolates the means, replays sinusoidal-control trajectories with `trajectories.ipynb` §4, and shows lower tracking error with friction compensation enabled than disabled.
 3. **Handle calibration** runs 2 s at the start of every task, reports/logs measured `baseline_min/max`, and errors out on a bad baseline.
 4. **`boost_human` in Task 1 and Task 0:** zero in the measured deadband; exponential ramp to ±12 N at ±0.20 V beyond the band; plateau toward ±`max_boost_N` at the 3.3 V / 0 V rails; sign matches push direction; not velocity-gated. Bench-tested before any Task 0 work, then bench-test in Task 0 **without** `boost_stiction`.
-5. **`boost_stiction` (Task 0 phase):** magnitude from `stiction_lookup_mN` × stiction_mult, sign from `sign(f_command)`, gated by `exp(-(v/5.0)^2)` — matching `ilc_runner.py`.
+5. **`boost_stiction` (Task 0 phase):** magnitude from `stiction_lookup_mN` × `stiction_mult`, direction `sign(f_command)` at rest / `sign(v)` sliding, scaled by the velocity envelope (full ≤ `stiction_v_thresh_mm_s`, exp-decay above) **and** the force envelope (full ≥ `stiction_force_thresh_mN`, exp-decay below — anti sign-flip near `f_command = 0`). *(This supersedes the original `exp(-(v/5.0)^2)` ILC gate.)*
 6. **Combination (Task 0 phase):** `BOOST_COMBINE_MODE` switches `ADDITIVE_CAPPED` (default) / `HUMAN_OVERRIDE` / `MAX_ALIGNED`; combined boost added before the safety clip; all components in telemetry + CSV.
 7. **Modularity:** characterization and validation live in their own sketches under `Arduino/`; the haptic/task sketch is not burdened with bench-only code.
 8. **No regressions:** handle at baseline + `boost_stiction` disabled → Task 0 behaves as before.

@@ -2,7 +2,7 @@
  * teensy_cartpole_sim.ino
  *
  * Physics-only cart-pole validation sketch for Teensy 4.1.  Runs a
- * semi-implicit Euler integrator for the cart-pole equations of motion
+ * classical RK4 integrator for the cart-pole equations of motion
  * and streams the trajectory to a Mac over UDP.  No motor, no Modbus,
  * no real-time constraint — the simulation runs as fast as possible.
  *
@@ -34,6 +34,7 @@ double sim_m_c = 1.0;
 double sim_m_p = 0.1;
 double sim_l   = 0.5;
 double sim_g   = 9.81;
+double sim_b   = 0.0;   // pendulum-joint viscous damping (MuJoCo `damping`)
 bool   sim_configured = false;
 
 // =====================================================================
@@ -144,6 +145,17 @@ static inline void dynamics(const double s[4], double fx, double ds[4]) {
                 - sim_m_p * sim_l * thetadot * thetadot * cs * sn
                 - (sim_m_c + sim_m_p) * sim_g * sn) / (sim_l * D);
 
+  // Pendulum-joint viscous damping: MuJoCo applies the joint `damping` as a
+  // generalized torque -b*thetadot on the hinge DOF. Solved through the coupled
+  // cart-pole mass matrix it perturbs BOTH accelerations (below). It reduces to
+  // tdd -= b*thetadot/(m_p*l^2) in the heavy-cart / prescribed-acceleration limit
+  // that the haptic loop uses, so the Step 3 port is the same physics.
+  if (sim_b != 0.0) {
+    xdd += cs * sim_b * thetadot / (sim_l * D);
+    tdd += -(sim_m_c + sim_m_p) * sim_b * thetadot
+           / (sim_m_p * sim_l * sim_l * D);
+  }
+
   ds[0] = xdot;
   ds[1] = thetadot;
   ds[2] = xdd;
@@ -248,11 +260,13 @@ void handle_command(char* line) {
     char* b = strtok(NULL, " \r\n");
     char* c = strtok(NULL, " \r\n");
     char* d = strtok(NULL, " \r\n");
+    char* e = strtok(NULL, " \r\n");  // optional damping b (default 0 if absent)
     if (a && b && c && d) {
       sim_m_c = strtod(a, NULL);
       sim_m_p = strtod(b, NULL);
       sim_l   = strtod(c, NULL);
       sim_g   = strtod(d, NULL);
+      sim_b   = e ? strtod(e, NULL) : 0.0;
       sim_configured = true;
       send_ack("SIM_CONFIG");
     } else {

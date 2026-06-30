@@ -11,6 +11,7 @@ class TestCase:
     m_p: float = 0.1
     l: float = 0.5
     g: float = 9.81
+    b: float = 0.0          # pendulum-joint viscous damping (MuJoCo `damping`)
     x0: float = 0.0
     theta0: float = 0.0
     xdot0: float = 0.0
@@ -58,6 +59,17 @@ CASES = [
 
 SWEEP_X0_VALUES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 SWEEP_RESIDUAL_TOL = 1e-9
+
+# Pendulum-joint damping sweep (`damping_sweep` mode). Values span [0, 1] and lie
+# on the ten-thousandths grid the haptic CMD_CONFIG will enforce (Step 3); each is
+# replayed on a large free swing so the damped decay is exercised, then checked
+# against the b-aware reference. b=0 is already covered by every other case.
+DAMPING_B_VALUES = [1e-4, 5e-4, 5e-3, 5e-2, 5e-1, 1.0]
+# Looser angle/ang-vel tol for the sweep: a large swing with strong damping has
+# steep early transients, so RK4-vs-DOP853 differences are slightly larger than
+# the undamped large_swing case.
+DAMPING_TOL_ANGLE = 2e-2
+DAMPING_TOL_ANGVEL = 5e-2
 
 CONVERGENCE_DTS = [0.002, 0.001, 0.0005, 0.00025, 0.000125]
 CONVERGENCE_SLOPE_RANGE = (0.9, 1.2)
