@@ -7,7 +7,7 @@
  * no real-time constraint — the simulation runs as fast as possible.
  *
  * Protocol and networking style match teensy_orca_bridge.ino.
- * See CARTPOLE_VALIDATION_README.md for the full specification.
+ * See cart_pendulum_task/.claude/HISTORY.md (Step 1 entry) for the full specification.
  */
 
 #include <QNEthernet.h>
