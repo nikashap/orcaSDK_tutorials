@@ -65,6 +65,7 @@ class ExtTelemetry:
     shaft_speed_mmps:  int   = 0
     shaft_accel_mmpss: int   = 0
     rtt_seq:           int   = 0   # 0 = untagged; nonzero = Python's seq for this cycle
+    calc_accel_window: int   = 0   # 0 = accel from register 346; >=2 = slope of N speed samples
     arrival_time:      float = 0.0   # Mac-side time.perf_counter() when received
 
 
@@ -145,10 +146,12 @@ class OrcaBridge:
 
         elif tag == "EXT_TELEMETRY" and len(parts) >= 14:
             # Format: EXT_TELEMETRY seq t_run t_speed t_accel t_total
-            #         pos force power temp voltage errors speed accel [rtt_seq]
-            # rtt_seq is optional (older Teensy firmware doesn't send it)
+            #         pos force power temp voltage errors speed accel
+            #         [rtt_seq] [calc_accel_window]
+            # Trailing fields are optional (older Teensy firmware omits them).
             try:
                 rtt = int(parts[14]) if len(parts) >= 15 else 0
+                caw = int(parts[15]) if len(parts) >= 16 else 0
                 ext = ExtTelemetry(
                     seq               = int(parts[1]),
                     t_run_us          = int(parts[2]),
@@ -164,6 +167,7 @@ class OrcaBridge:
                     shaft_speed_mmps  = int(parts[12]),
                     shaft_accel_mmpss = int(parts[13]),
                     rtt_seq           = rtt,
+                    calc_accel_window = caw,
                     arrival_time      = time.perf_counter(),
                 )
                 with self._ext_collect_lock:
@@ -468,6 +472,16 @@ def run_timing_test(duration_s: float = 10.0,
           f"({expected_count} expected, {len(seqs)} received, "
           f"{dropped} dropped on UDP)")
 
+    # Confirm which accel path the Teensy ACTUALLY ran (from the data, not what we
+    # asked for). If this disagrees with --calc-accel-window the firmware is stale
+    # or the arg didn't arrive, and t_accel_us reflects the register read.
+    reported = {s.calc_accel_window for s in samples}
+    print(f"Requested calc_accel_window={calc_accel_window}; "
+          f"Teensy reported {sorted(reported)}")
+    if calc_accel_window >= 2 and reported == {0}:
+        print("  !! Teensy ran REGISTER mode despite the request — reflash the "
+              ".ino and confirm the 'INFO accel=rolling_window' line on enable.")
+
     # ---- Stats ----
     def summarize(label: str, values: list[int], unit: str = "µs"):
         if not values:
@@ -504,12 +518,14 @@ def run_timing_test(duration_s: float = 10.0,
         w.writerow(["seq", "arrival_time_s",
                     "t_run_us", "t_speed_us", "t_accel_us", "t_total_us",
                     "position_um", "force_mn", "power_w", "temperature_c",
-                    "voltage_mv", "errors", "shaft_speed_mmps", "shaft_accel_mmpss"])
+                    "voltage_mv", "errors", "shaft_speed_mmps", "shaft_accel_mmpss",
+                    "calc_accel_window"])
         for s in samples:
             w.writerow([s.seq, f"{s.arrival_time:.6f}",
                         s.t_run_us, s.t_speed_us, s.t_accel_us, s.t_total_us,
                         s.position_um, s.force_mn, s.power_w, s.temperature_c,
-                        s.voltage_mv, s.errors, s.shaft_speed_mmps, s.shaft_accel_mmpss])
+                        s.voltage_mv, s.errors, s.shaft_speed_mmps, s.shaft_accel_mmpss,
+                        s.calc_accel_window])
     print(f"\nSaved raw samples → {csv_path}")
 
     # ---- Plot histograms ----

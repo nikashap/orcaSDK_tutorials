@@ -453,13 +453,16 @@ void send_telemetry() {
 // timing. Format:
 //   EXT_TELEMETRY <seq> <t_run_us> <t_speed_us> <t_accel_us> <t_total_us>
 //                 <pos_um> <force_mn> <power_w> <temp_c> <voltage_mv> <errors>
-//                 <speed_mmps> <accel_mmpss> <rtt_seq>
+//                 <speed_mmps> <accel_mmpss> <rtt_seq> <calc_accel_window>
 // rtt_seq = 0 means this cycle wasn't tagged; nonzero means it consumed
 // the SET_RTT with that Python-side sequence number.
+// calc_accel_window = 0 means accel came from register 346; >=2 means it was
+// computed from a trailing-window slope of that many speed samples. Logging it
+// makes which accel path actually ran unambiguous in the data.
 void send_ext_telemetry() {
   char buf[256];
   snprintf(buf, sizeof(buf),
-    "EXT_TELEMETRY %lu %lu %lu %lu %lu %ld %ld %u %d %u %u %ld %ld %lu",
+    "EXT_TELEMETRY %lu %lu %lu %lu %lu %ld %ld %u %d %u %u %ld %ld %lu %u",
     (unsigned long)ext.seq,
     (unsigned long)ext.t_run_us,
     (unsigned long)ext.t_speed_us,
@@ -473,7 +476,8 @@ void send_ext_telemetry() {
     (unsigned)ext.errors,
     (long)ext.shaft_speed_mmps,
     (long)ext.shaft_accel_mmpss,
-    (unsigned long)ext.rtt_seq);
+    (unsigned long)ext.rtt_seq,
+    (unsigned)calc_accel_window);
   send_udp(buf);
 }
 
