@@ -35,7 +35,7 @@ uint16_t  macPort = 0;
 // =====================================================================
 constexpr uint8_t  MOTOR_ADDR             = 0x01;
 constexpr uint32_t DEFAULT_BAUD           = 1000000;
-constexpr uint32_t DEFAULT_INTERFRAME_US  = 100;
+constexpr uint32_t DEFAULT_INTERFRAME_US  = 0;
 
 // Function codes
 constexpr uint8_t FC_READ_HOLDING         = 0x03;
