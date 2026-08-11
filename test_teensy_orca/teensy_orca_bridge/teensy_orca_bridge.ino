@@ -545,6 +545,11 @@ void cmd_enable_extended_stream(uint8_t sub_code, int32_t data, uint32_t period_
   ext.seq      = 0;
   phase        = Phase::STREAMING;
   since_last_stream = stream_period_us; // fire immediately
+
+  // Match the haptic loop: run the three transactions with zero interframe
+  // delay so the measured floor isn't inflated by a CONNECT-negotiated gap.
+  current_interframe_us = DEFAULT_INTERFRAME_US;
+
   send_ack("ENABLE_EXT_STREAM");
 }
 

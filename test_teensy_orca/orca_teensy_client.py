@@ -324,7 +324,7 @@ def demo():
         log_phase("PING", True)
 
         # ---- Connect
-        if not bridge.connect(baud=1000000, interframe_us=100):
+        if not bridge.connect(baud=1000000, interframe_us=0):
             log_phase("CONNECT", False, "did not ACK")
             return
         log_phase("CONNECT", True)
@@ -407,7 +407,7 @@ def run_timing_test(duration_s: float = 10.0,
             return
         print("  [OK] PING")
 
-        if not bridge.connect(baud=1000000, interframe_us=100):
+        if not bridge.connect(baud=1000000, interframe_us=0):
             print("  [FAIL] CONNECT")
             return
         print("  [OK] CONNECT")
@@ -561,7 +561,7 @@ def run_rtt_test(duration_s: float = 10.0,
             return
         print("  [OK] PING")
 
-        if not bridge.connect(baud=1000000, interframe_us=100):
+        if not bridge.connect(baud=1000000, interframe_us=0):
             print("  [FAIL] CONNECT")
             return
         print("  [OK] CONNECT")
