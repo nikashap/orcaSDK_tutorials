@@ -230,11 +230,17 @@ class OrcaBridge:
 
     def enable_extended_force_stream(self, force_mn: int = 0,
                                      period_us: int = 0,
+                                     calc_accel_window: int = 0,
                                      timeout: float = 2.0) -> bool:
-        """Enable extended mode: each cycle does 0x64 + read speed + read accel.
+        """Enable extended mode: each cycle does 0x64 + read speed + (accel).
+
+        calc_accel_window selects the acceleration source:
+          0    -> read the motor's accel register 346 (t_accel_us = Modbus read)
+          >=2  -> compute accel from a causal least-squares slope of the last N
+                  speed samples (t_accel_us = computation; no register read)
         Per-cycle timing is reported in EXT_TELEMETRY messages."""
         return self._send_and_ack(
-            f"ENABLE_EXT_STREAM 1C {force_mn} {period_us}",
+            f"ENABLE_EXT_STREAM 1C {force_mn} {period_us} {calc_accel_window}",
             "ENABLE_EXT_STREAM", timeout)
 
     def start_ext_collection(self):
@@ -393,12 +399,18 @@ def demo():
 
 def run_timing_test(duration_s: float = 10.0,
                     force_mn: int = 0,
+                    calc_accel_window: int = 0,
                     output_prefix: str = "timing_test"):
     """Run the extended-stream timing test for `duration_s` seconds.
     At the end, print summary stats, save CSV of raw samples, and save
-    a PNG of histograms."""
+    a PNG of histograms.
+
+    calc_accel_window == 0 reads the accel register; >=2 computes accel from a
+    trailing-window slope of speed. The t_accel_us column times whichever ran."""
+    accel_src = (f"rolling-window slope (W={calc_accel_window})"
+                 if calc_accel_window >= 2 else "register 346 read")
     print(f"=== Timing test: {duration_s}s, force={force_mn} mN, "
-          f"period=as-fast-as-possible ===\n")
+          f"period=as-fast-as-possible, accel={accel_src} ===\n")
     bridge = OrcaBridge()
 
     try:
@@ -416,7 +428,9 @@ def run_timing_test(duration_s: float = 10.0,
         # very first samples.
         bridge.start_ext_collection()
 
-        if not bridge.enable_extended_force_stream(force_mn=force_mn, period_us=0):
+        if not bridge.enable_extended_force_stream(
+                force_mn=force_mn, period_us=0,
+                calc_accel_window=calc_accel_window):
             print("  [FAIL] ENABLE_EXT_STREAM")
             bridge.stop_ext_collection()
             return
@@ -470,10 +484,12 @@ def run_timing_test(duration_s: float = 10.0,
             q = statistics.quantiles(values, n=100)
             print(f"    p95={q[94]:.2f}{unit}  p99={q[98]:.2f}{unit}")
 
+    accel_label = (f"accel: rolling slope W={calc_accel_window}"
+                   if calc_accel_window >= 2 else "accel: register 346 read")
     print("\n=== Per-transaction timing (Teensy-measured) ===")
     summarize("motor.run() (0x64)",       [s.t_run_us   for s in samples])
     summarize("read shaft speed (0x03)",  [s.t_speed_us for s in samples])
-    summarize("read shaft accel (0x03)",  [s.t_accel_us for s in samples])
+    summarize(accel_label,                [s.t_accel_us for s in samples])
     summarize("TOTAL cycle",              [s.t_total_us for s in samples])
     duration_actual = (samples[-1].arrival_time - samples[0].arrival_time)
     if duration_actual > 0:
@@ -509,7 +525,7 @@ def run_timing_test(duration_s: float = 10.0,
     series = [
         ("motor.run() (0x64)",      [s.t_run_us   for s in samples]),
         ("read shaft speed (0x03)", [s.t_speed_us for s in samples]),
-        ("read shaft accel (0x03)", [s.t_accel_us for s in samples]),
+        (accel_label,               [s.t_accel_us for s in samples]),
         ("TOTAL cycle",             [s.t_total_us for s in samples]),
     ]
     for ax, (label, values) in zip(axes, series):
@@ -744,6 +760,10 @@ def main():
                         "or amplitude for --rtt-test (default 100 if 0)")
     p.add_argument("--send-period-ms", type=float, default=5.0,
                    help="Tagged-send interval for --rtt-test (default 5.0 ms)")
+    p.add_argument("--calc-accel-window", type=int, default=0,
+                   help="For --timing-test: 0 reads the accel register (default); "
+                        ">=2 computes accel from a trailing-window slope of that "
+                        "many speed samples")
     p.add_argument("--output", type=str, default=None,
                    help="Output filename prefix "
                         "(default: 'timing_test' or 'rtt_test' depending on mode)")
@@ -762,6 +782,7 @@ def main():
         prefix = args.output or "timing_test"
         run_timing_test(duration_s=args.duration,
                         force_mn=args.force,
+                        calc_accel_window=args.calc_accel_window,
                         output_prefix=prefix)
     else:
         # Default: run the demo (preserves old behavior)

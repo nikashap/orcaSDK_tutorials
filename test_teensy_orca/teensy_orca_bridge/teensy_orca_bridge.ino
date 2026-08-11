@@ -78,6 +78,20 @@ bool extended_mode = false;
 constexpr uint16_t REG_SHAFT_SPEED = 344;   // mm/s, double-wide signed
 constexpr uint16_t REG_SHAFT_ACCEL = 346;   // mm/s^2, double-wide signed
 
+// Acceleration source. The motor's accel register (346) lags true acceleration
+// by ~65 ms beyond the speed register (an internal low-pass), so as an
+// alternative we can compute accel online from a causal trailing-window slope of
+// the speed samples instead of reading the register.
+//   calc_accel_window == 0  -> read register 346 (t_accel_us times the Modbus read)
+//   calc_accel_window >= 2  -> least-squares slope of the last N speed samples
+//                              (t_accel_us times the computation; no Modbus read)
+uint16_t calc_accel_window = 0;
+constexpr int ACCEL_WIN_MAX = 64;
+double    vbuf_mmps[ACCEL_WIN_MAX];   // recent speed samples (mm/s)
+uint32_t  vbuf_t_us[ACCEL_WIN_MAX];   // micros() stamp of each speed sample
+int       vbuf_count = 0;             // valid samples so far (<= ACCEL_WIN_MAX)
+int       vbuf_head  = 0;             // next write index (ring)
+
 // Latest extended telemetry (filled in extended mode)
 struct ExtTelemetry {
   // From 0x64 response
@@ -237,6 +251,39 @@ bool parse_read_holding_2reg_int32(const uint8_t* buf, size_t len, int32_t* out)
   uint16_t hi = ((uint16_t)buf[5] << 8) | buf[6];
   uint32_t v  = ((uint32_t)hi << 16) | lo;
   *out = (int32_t)v;
+  return true;
+}
+
+// Push one speed sample into the ring used by the rolling-window accel calc.
+void push_speed_sample(int32_t speed_mmps, uint32_t t_us) {
+  vbuf_mmps[vbuf_head] = (double)speed_mmps;
+  vbuf_t_us[vbuf_head] = t_us;
+  vbuf_head = (vbuf_head + 1) % ACCEL_WIN_MAX;
+  if (vbuf_count < ACCEL_WIN_MAX) vbuf_count++;
+}
+
+// Causal least-squares slope of the last calc_accel_window speed samples
+// (mm/s vs seconds) -> acceleration in mm/s^2. Uses the real per-sample micros()
+// stamps, so it is correct under loop jitter. Returns false (accel 0) until at
+// least two samples have accumulated.
+bool compute_rolling_accel(int32_t* out) {
+  int W = calc_accel_window;
+  if (W > ACCEL_WIN_MAX) W = ACCEL_WIN_MAX;
+  if (W > vbuf_count)    W = vbuf_count;
+  if (W < 2) { *out = 0; return false; }
+
+  int newest = (vbuf_head - 1 + ACCEL_WIN_MAX) % ACCEL_WIN_MAX;
+  uint32_t t_ref = vbuf_t_us[newest];
+  double sum_t = 0, sum_v = 0, sum_tt = 0, sum_tv = 0;
+  for (int k = 0; k < W; k++) {
+    int idx = (newest - k + ACCEL_WIN_MAX) % ACCEL_WIN_MAX;
+    double tk = (double)(int32_t)(vbuf_t_us[idx] - t_ref) * 1e-6;  // s, <= 0
+    double vk = vbuf_mmps[idx];                                    // mm/s
+    sum_t += tk; sum_v += vk; sum_tt += tk * tk; sum_tv += tk * vk;
+  }
+  double denom = (double)W * sum_tt - sum_t * sum_t;
+  if (fabs(denom) < 1e-12) { *out = 0; return false; }
+  *out = (int32_t)lround(((double)W * sum_tv - sum_t * sum_v) / denom);
   return true;
 }
 
@@ -532,7 +579,8 @@ void cmd_enable_stream(uint8_t sub_code, int32_t data, uint32_t period_us) {
 // Sub-transaction timing is recorded per cycle and reported in EXT_TELEMETRY.
 // stream_period_us = 0 means "as fast as possible" — each cycle starts
 // immediately after the previous completes.
-void cmd_enable_extended_stream(uint8_t sub_code, int32_t data, uint32_t period_us) {
+void cmd_enable_extended_stream(uint8_t sub_code, int32_t data, uint32_t period_us,
+                                uint16_t accel_window) {
   if (phase != Phase::CONNECT && phase != Phase::STREAM_ENABLED) {
     send_error("ENABLE_REQUIRES_CONNECT");
     return;
@@ -546,9 +594,22 @@ void cmd_enable_extended_stream(uint8_t sub_code, int32_t data, uint32_t period_
   phase        = Phase::STREAMING;
   since_last_stream = stream_period_us; // fire immediately
 
+  // Acceleration source for this run; empty the speed ring so a rolling window
+  // starts fresh (no stale samples from a previous stream).
+  calc_accel_window = (accel_window >= 2) ? accel_window : 0;
+  vbuf_count = 0;
+  vbuf_head  = 0;
+
   // Match the haptic loop: run the three transactions with zero interframe
   // delay so the measured floor isn't inflated by a CONNECT-negotiated gap.
   current_interframe_us = DEFAULT_INTERFRAME_US;
+
+  char msg[80];
+  if (calc_accel_window >= 2)
+    snprintf(msg, sizeof(msg), "INFO accel=rolling_window window=%u", calc_accel_window);
+  else
+    snprintf(msg, sizeof(msg), "INFO accel=register_346");
+  send_udp(msg);
 
   send_ack("ENABLE_EXT_STREAM");
 }
@@ -639,9 +700,11 @@ void handle_command(char* line) {
     char* a = strtok(NULL, " \r\n");
     char* b = strtok(NULL, " \r\n");
     char* c = strtok(NULL, " \r\n");
+    char* d = strtok(NULL, " \r\n");   // optional accel window (0 = register)
     if (a && b && c) {
       uint8_t sub = (uint8_t)strtol(a, NULL, 16);
-      cmd_enable_extended_stream(sub, (int32_t)atol(b), (uint32_t)atol(c));
+      uint16_t win = d ? (uint16_t)atoi(d) : 0;
+      cmd_enable_extended_stream(sub, (int32_t)atol(b), (uint32_t)atol(c), win);
     } else send_error("ENABLE_EXT_BAD_ARGS");
   }
   else if (strcmp(tok, "SET") == 0) {
@@ -740,12 +803,24 @@ void loop() {
       ext.t_speed_us = (uint32_t)t2;
       bool ok_speed = parse_read_holding_2reg_int32(rx, n2, &ext.shaft_speed_mmps);
 
-      // ---- Tx3: 0x03 read shaft acceleration (2 regs, 32-bit) ----
+      // Feed the speed ring (both modes, so switching modes is seamless). Timed
+      // outside t3 — it is common per-cycle overhead, not part of either the
+      // register read or the slope compute we are comparing.
+      if (ok_speed) push_speed_sample(ext.shaft_speed_mmps, micros());
+
+      // ---- Tx3: acceleration — register read OR rolling-window slope ----
+      // t_accel_us times whichever path ran, so the two are directly comparable.
       elapsedMicros t3;
-      tx_len = build_read_holding(tx, REG_SHAFT_ACCEL, 2);
-      int n3 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
+      int  n3 = 0;
+      bool ok_accel;
+      if (calc_accel_window >= 2) {
+        ok_accel = compute_rolling_accel(&ext.shaft_accel_mmpss);
+      } else {
+        tx_len = build_read_holding(tx, REG_SHAFT_ACCEL, 2);
+        n3 = modbus_transact(tx, tx_len, rx, sizeof(rx), 5000, 9);
+        ok_accel = parse_read_holding_2reg_int32(rx, n3, &ext.shaft_accel_mmpss);
+      }
       ext.t_accel_us = (uint32_t)t3;
-      bool ok_accel = parse_read_holding_2reg_int32(rx, n3, &ext.shaft_accel_mmpss);
 
       ext.t_total_us = (uint32_t)cycle_t;
       ext.seq++;
